@@ -13,3 +13,10 @@ __pycache__
 
 # 过滤 tmp/ground_segment_scripts/Grounded-SAM-2/gdino_checkpoints 下的所有 .pth 文件
 /ground_segment_scripts/Grounded-SAM-2/gdino_checkpoints/*.pth
+
+# Evaluation temp files & run artifacts
+ground_segment_scripts/_tmp_eval_*.py
+results/
+tool_cache/
+kg_cache/
+
