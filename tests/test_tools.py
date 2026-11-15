@@ -257,5 +257,70 @@ def test_grounding_tool_switch():
     assert hasattr(cands_r[0], "boxes")
 
 
+def test_referdino_raises_without_checkpoint():
+    """ReferDINOTool must raise FileNotFoundError when checkpoint is missing and use_mock=False."""
+    with pytest.raises((FileNotFoundError, RuntimeError)):
+        ReferDINOTool(checkpoint_path="nonexistent_referdino_ckpt.pth", use_mock=False)
+
+
+def test_referdino_candidate_schema_with_stub():
+    """ReferDINOTool returns valid Candidate objects with an injected stub model."""
+    fixtures_dir = os.path.join(REPO_ROOT, "tests", "fixtures")
+
+    class ReferDINOStubModel:
+        def predict_clip(self, frame_paths, text):
+            return [
+                {
+                    "boxes": [[0.1, 0.2, 0.5, 0.6]] * 10,
+                    "masks": None,
+                    "score": 0.88,
+                },
+                {
+                    "boxes": [[0.6, 0.3, 0.9, 0.8]] * 10,
+                    "masks": None,
+                    "score": 0.72,
+                }
+            ]
+
+    tool = ReferDINOTool(
+        checkpoint_path="dummy",
+        media_dir=fixtures_dir,
+        use_mock=False,
+        model=ReferDINOStubModel(),
+    )
+
+    cands = tool.run("moving_rect", "the moving object")
+    assert len(cands) == 2
+    for c in cands:
+        assert isinstance(c, Candidate)
+        assert hasattr(c, "cand_id")
+        assert len(c.boxes) == 10
+        assert hasattr(c, "score")
+        assert hasattr(c, "mean_area")
+        assert c.side in ("left", "center", "right")
+
+
+def test_referdino_tool_no_groundingdino_import():
+    """Verify that ReferDINOTool does NOT import grounding_dino or groundingdino."""
+    referdino_file = os.path.join(REPO_ROOT, "tools", "referdino_tool.py")
+    with open(referdino_file, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Split into ReferDINOTool class definition vs the rest
+    assert "class ReferDINOTool:" in content
+    cls_code = content.split("class ReferDINOTool:")[1].split("class GroundingDINOTool:")[0]
+    assert "groundingdino" not in cls_code.lower()
+    assert "grounding_dino" not in cls_code.lower()
+
+
+def test_server_info_endpoint():
+    """Verify RealToolServer /info endpoint returns grounder information."""
+    from tools.server import RealToolServer
+    server = RealToolServer(media_dir="./REFAVS/media", grounder="gdino", use_mock=True)
+    assert hasattr(server, "grounder_name")
+    assert server.grounder_name == "gdino"
+    assert server.referdino is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

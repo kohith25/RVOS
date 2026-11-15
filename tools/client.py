@@ -65,6 +65,17 @@ class ToolClient:
                 return None
         return None
 
+    def get_info(self) -> Dict[str, Any]:
+        """Queries the tool server's /info endpoint to get actual grounder and tool details."""
+        if self.use_mock_fallback:
+            return {"grounder": "mock", "grounder_class": "MockReferDINOTool", "status": "ok"}
+        try:
+            req = urllib.request.Request(f"{self.server_url}/info")
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception:
+            return {"grounder": "unknown", "grounder_class": "unknown", "status": "offline"}
+
     def _write_cache(self, key, result):
         if not self.use_cache:
             return

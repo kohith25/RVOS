@@ -32,15 +32,16 @@ from kg.retriever import retrieve
 
 
 class RealToolServer:
-    def __init__(self, media_dir="./REFAVS/media", kg_dir="kg_cache", grounder="gdino"):
+    def __init__(self, media_dir="./REFAVS/media", kg_dir="kg_cache", grounder="gdino", use_mock=False):
         self.media_dir = media_dir
         self.kg_dir = kg_dir
         self.grounder_name = grounder
+        self.use_mock = use_mock
         if grounder == "referdino":
-            self.referdino = ReferDINOTool(use_mock=False, media_dir=media_dir)
+            self.referdino = ReferDINOTool(use_mock=use_mock, media_dir=media_dir)
         else:
-            self.referdino = GroundingDINOTool(use_mock=False, media_dir=media_dir)
-        self.sam2 = SAM2Tool(use_mock=False, media_dir=media_dir)
+            self.referdino = GroundingDINOTool(use_mock=use_mock, media_dir=media_dir)
+        self.sam2 = SAM2Tool(use_mock=use_mock, media_dir=media_dir)
 
     def referdino_ground(self, video_id: str, text: str) -> List[Dict[str, Any]]:
         candidates = self.referdino.run(video_id, text)
@@ -66,6 +67,13 @@ class ToolRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self._send_json(200, {"status": "ok", "service": "tgs_tool_server"})
+        elif self.path == "/info":
+            grounder_cls = self.tool_server.referdino.__class__.__name__
+            self._send_json(200, {
+                "status": "ok",
+                "grounder": self.tool_server.grounder_name,
+                "grounder_class": grounder_cls,
+            })
         else:
             self._send_json(404, {"error": "Endpoint not found"})
 

@@ -60,6 +60,17 @@ python tools/server.py --port 8088 --grounder gdino
 # To use ReferDINO instead: python tools/server.py --port 8088 --grounder referdino
 ```
 
+### ReferDINO Environment & Setup Notes
+ReferDINO (ICCV 2025: *Referring Video Object Segmentation with Visual Grounding Foundations*) is the clip-level spatio-temporal referring grounder.
+- **Checkpoint Location:** Place `referdino_swin_base.pth` and `referdino_config.py` in `pretrained_weights/referdino/`.
+- **Download Instructions:** Download weights and config from the official repository: [ReferDINO GitHub](https://github.com/referdino/ReferDINO).
+- **Smoke Test:** Run on a single video clip to verify installation:
+  ```bash
+  python scripts/smoke_referdino.py --video_dir ./REFAVS/media/vid_001 --expr "the person playing guitar"
+  ```
+- **Tool Server Endpoint:** The server exposes `GET /info` which returns the actual instantiated grounder class (`ReferDINOTool` vs `GroundingDINOTool`), ensuring `results.json` records verified model provenance.
+
+
 ---
 
 ## Step 1 — Cold-Start Action SFT
