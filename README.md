@@ -1,31 +1,4 @@
-# Think Before You Segment: An Object-aware Reasoning Agent for Referring Audio-Visual Segmentation
 
-
-[![TGS](https://img.shields.io/badge/Paper-TGS-2b9348.svg?logo=arXiv)](https://arxiv.org/pdf/2508.04418)
-[![Dataset](https://img.shields.io/badge/Dataset-Download-yellow)](https://drive.google.com/drive/folders/1Qz7MxBs7IpxgcTH8CaUsU3i9d366gRhM)
-[![HF_checkpoint](https://img.shields.io/badge/🤗-TGS_Model-9C276A.svg)](https://huggingface.co/Jinxing1/TGS-Agent/tree/main)
-
-
-## 📰 News
-
-🔥**2025.11.08**: Our paper got accepted to **AAAI 2026**! Thanks to all co-authors and the anonymous reviewers🎉🎉
-
-🔥**2025.11.01**: Data, Code, and Checkpoints are released!
-
-
-
-## 📄 Citation
-
-If our work assists your research, feel free to give us a star ⭐ and cite us using
-
-```
-@article{zhou2025think,
-  title={Think before you segment: An object-aware reasoning agent for referring audio-visual segmentation},
-  author={Zhou, Jinxing and Zhou, Yanghao and Han, Mingfei and Wang, Tong and Chang, Xiaojun and Cholakkal, Hisham and Anwer, Rao Muhammad},
-  journal={arXiv preprint arXiv:2508.04418},
-  year={2025}
-}
-```
 
 ## ⚙️ Installation
 
