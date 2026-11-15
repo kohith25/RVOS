@@ -30,13 +30,12 @@ from rl_grpo.build_model import build_tgs_model
 from rl_grpo.model_adapter import TGSModelAdapter
 from rl_grpo.trajectory import TrajectoryCollector, Trajectory
 from tools.client import ToolClient, get_tool_client
-try:
-    from utils.avss_utils import mask_iou, Eval_Fmeasure, metric_s_for_null_batch
-except ImportError:
-    # Pure-numpy fallback for environments without PyTorch
-    def mask_iou(*args, **kwargs): return 0.0
-    def Eval_Fmeasure(*args, **kwargs): return 0.0
-    def metric_s_for_null_batch(*args, **kwargs): return 0.0
+
+# Import avss_utils with NO fallback (let ImportError propagate if environment lacks dependencies)
+grounded_sam2_path = os.path.join(REPO_ROOT, "ground_segment_scripts", "Grounded-SAM-2")
+if grounded_sam2_path not in sys.path:
+    sys.path.insert(0, grounded_sam2_path)
+from utils.avss_utils import mask_iou, Eval_Fmeasure, metric_s_for_null_batch
 
 
 def parse_args():
@@ -119,6 +118,7 @@ def main():
         model_adapter=model_adapter,
         tool_client=tool_client,
         max_turns=4,
+        use_kg=use_kg,
     )
 
     # 2. Load Dataset Samples
@@ -172,43 +172,79 @@ def main():
         latency = time.time() - start_t
 
         pred_masks = traj.final_pred_masks
-        if pred_masks is None:
-            # Fallback to zeros if no mask action was taken
-            h = gt_masks.shape[1] if (gt_masks is not None and hasattr(gt_masks, "shape")) else 224
-            w = gt_masks.shape[2] if (gt_masks is not None and hasattr(gt_masks, "shape")) else 224
-            pred_masks = np.zeros((10, h, w), dtype=np.uint8)
+        pred_logits = traj.final_pred_logits
 
-        # Compute Metrics
-        if is_null:
-            # For test_n, evaluate S_null
-            null_acc = 1.0 if np.all(pred_masks == 0) else 0.0
-            null_scores.append(null_acc)
+        if pred_masks is None:
+            pred_masks = np.zeros((10, 224, 224), dtype=np.uint8)
+        if pred_logits is None:
+            pred_logits = np.zeros((10, 224, 224), dtype=np.float32)
+
+        import torch
+        import torch.nn.functional as F
+
+        pred_masks_tensor = torch.from_numpy(pred_masks).to(torch.uint8)
+        pred_logits_tensor = torch.from_numpy(pred_logits).to(torch.float32)
+
+        if gt_masks is not None:
+            if isinstance(gt_masks, np.ndarray):
+                gt_masks_tensor = torch.from_numpy(gt_masks.astype(np.uint8))
+            elif isinstance(gt_masks, torch.Tensor):
+                gt_masks_tensor = gt_masks.to(torch.uint8)
+            else:
+                gt_masks_tensor = torch.zeros((10, 224, 224), dtype=torch.uint8)
+        else:
+            gt_masks_tensor = torch.zeros((10, 224, 224), dtype=torch.uint8)
+
+        # Standardize shapes to [10, 224, 224] matching original evaluation
+        if pred_masks_tensor.ndim == 4 and pred_masks_tensor.shape[1] == 1:
+            pred_masks_tensor = pred_masks_tensor.squeeze(1)
+        if gt_masks_tensor.ndim == 4 and gt_masks_tensor.shape[1] == 1:
+            gt_masks_tensor = gt_masks_tensor.squeeze(1)
+        if pred_logits_tensor.ndim == 4 and pred_logits_tensor.shape[1] == 1:
+            pred_logits_tensor = pred_logits_tensor.squeeze(1)
+
+        if pred_masks_tensor.shape[-2:] != (224, 224):
+            pred_masks_tensor = F.interpolate(
+                pred_masks_tensor.unsqueeze(1).float(), size=(224, 224), mode="nearest"
+            ).squeeze(1).to(torch.uint8)
+        if gt_masks_tensor.shape[-2:] != (224, 224):
+            gt_masks_tensor = F.interpolate(
+                gt_masks_tensor.unsqueeze(1).float(), size=(224, 224), mode="nearest"
+            ).squeeze(1).to(torch.uint8)
+        if pred_logits_tensor.shape[-2:] != (224, 224):
+            pred_logits_tensor = F.interpolate(
+                pred_logits_tensor.unsqueeze(1), size=(224, 224), mode="bilinear", align_corners=False
+            ).squeeze(1).to(torch.float32)
+
+        ref_text = sample.get("ref", "")
+        if args.test_name == "test_n":
+            if ref_text == "null":
+                mean_iou = 0.0
+            else:
+                mean_iou = metric_s_for_null_batch(pred_masks_tensor)
+            fscore = -999
+        else:
+            mean_iou = mask_iou(pred_masks_tensor, gt_masks_tensor)
+            fscore = Eval_Fmeasure(pred=pred_logits_tensor.cpu(), gt=gt_masks_tensor.cpu())
+
+        iou_val = mean_iou.item() if isinstance(mean_iou, torch.Tensor) else float(mean_iou)
+        fscore_val = fscore.item() if isinstance(fscore, torch.Tensor) else float(fscore)
+
+        if args.test_name == "test_n":
+            null_scores.append(iou_val)
             per_video[uid] = {
                 "vid": uid,
-                "s_null_acc": null_acc,
+                "s_null_acc": round(iou_val, 4),
                 "turns": len(traj.turns),
                 "latency_sec": round(latency, 2),
             }
         else:
-            # Frame-level IoU and video F-score
-            vid_ious = []
-            for t in range(10):
-                pm = pred_masks[t] > 0
-                gm = gt_masks[t] > 0 if gt_masks is not None else np.zeros_like(pm)
-                inter = np.logical_and(pm, gm).sum()
-                union = np.logical_or(pm, gm).sum()
-                vid_ious.append(float(inter / union) if union > 0 else (1.0 if np.all(~pm) and np.all(~gm) else 0.0))
-
-            mean_iou = float(np.mean(vid_ious))
-            # Approximate or standard Eval_Fmeasure
-            mean_f = max(0.0, mean_iou - 0.03)  # F-score closely tracks IoU
-            ious.append(mean_iou)
-            fscores.append(mean_f)
-
+            ious.append(iou_val)
+            fscores.append(fscore_val)
             per_video[uid] = {
                 "vid": uid,
-                "s_mean_iou": round(mean_iou, 4),
-                "s_fscore": round(mean_f, 4),
+                "s_mean_iou": round(iou_val, 4),
+                "s_fscore": round(fscore_val, 4),
                 "turns": len(traj.turns),
                 "latency_sec": round(latency, 2),
             }
@@ -230,21 +266,37 @@ def main():
     if len(per_video) == 0:
         raise RuntimeError("Inference completed with 0 videos evaluated. Rejecting dummy results.")
 
-    # 4. Aggregate Metrics
+    # 4. Aggregate Metrics exactly as original ground_segment script lines 293-309
+    valid_ious = []
+    valid_fscores = []
+    for item_data in per_video.values():
+        if args.test_name == "test_n":
+            iou_v = item_data.get("s_null_acc")
+            if isinstance(iou_v, (int, float)) and iou_v >= 0:
+                valid_ious.append(iou_v)
+        else:
+            iou_v = item_data.get("s_mean_iou")
+            fscore_v = item_data.get("s_fscore")
+            if isinstance(iou_v, (int, float)) and iou_v >= 0:
+                valid_ious.append(iou_v)
+            if isinstance(fscore_v, (int, float)) and fscore_v >= 0:
+                valid_fscores.append(fscore_v)
+
+    average_iou = sum(valid_ious) / len(valid_ious) if valid_ious else 0.0
+    average_fscore = sum(valid_fscores) / len(valid_fscores) if valid_fscores else 0.0
+
     if args.test_name == "test_n":
         final_metrics = {
             "J": None,
             "F": None,
             "J_and_F": None,
-            "S_null": round(float(np.mean(null_scores)), 4) if null_scores else 0.0,
+            "S_null": round(average_iou, 4),
         }
     else:
-        j_val = round(float(np.mean(ious)), 4) if ious else 0.0
-        f_val = round(float(np.mean(fscores)), 4) if fscores else 0.0
         final_metrics = {
-            "J": j_val,
-            "F": f_val,
-            "J_and_F": round((j_val + f_val) / 2.0, 4),
+            "J": round(average_iou, 4),
+            "F": round(average_fscore, 4),
+            "J_and_F": round((average_iou + average_fscore) / 2.0, 4),
             "S_null": 0.0,
         }
 

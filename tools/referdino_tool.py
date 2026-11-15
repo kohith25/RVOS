@@ -183,7 +183,111 @@ class ReferDINOTool:
         return candidates
 
 
+class GroundingDINOTool(ReferDINOTool):
+    """
+    GroundingDINO baseline tool that links frame-level bounding boxes across
+    consecutive video frames via spatial IoU tracking.
+    """
+    def run(self, video_id: str, text: str) -> List[Candidate]:
+        if self.use_mock:
+            return super().run(video_id, text)
+
+        # Real GroundingDINO with IoU-based inter-frame tracking
+        if self.model is None:
+            raise RuntimeError("GroundingDINO model is not loaded.")
+
+        from grounding_dino.groundingdino.util.inference import load_image, predict
+        vid = video_id.rsplit("_", 2)[0] if "_" in video_id else video_id
+        frame_dir = os.path.join(self.media_dir, vid, "frames")
+
+        if not os.path.exists(frame_dir):
+            raise FileNotFoundError(f"Video frames directory not found: {frame_dir}")
+
+        frame_detections = []
+        for img_id in range(10):
+            img_path = os.path.join(frame_dir, f"{img_id}.jpg")
+            if not os.path.exists(img_path):
+                frame_detections.append([])
+                continue
+
+            _, image = load_image(img_path)
+            boxes, logits, _ = predict(
+                model=self.model,
+                image=image,
+                caption=text,
+                box_threshold=self.box_threshold,
+                text_threshold=self.text_threshold,
+                device=self.device,
+            )
+            if boxes.shape[0] > 0:
+                xyxy = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").cpu().numpy()
+                scores = logits.cpu().numpy()
+                frame_dets = [{"box": xyxy[i].tolist(), "score": float(scores[i])} for i in range(len(scores))]
+            else:
+                frame_dets = []
+            frame_detections.append(frame_dets)
+
+        # IoU tracking across 10 frames
+        def box_iou(b1, b2):
+            if len(b1) != 4 or len(b2) != 4 or b1 == [0, 0, 0, 0] or b2 == [0, 0, 0, 0]:
+                return 0.0
+            ix1, iy1 = max(b1[0], b2[0]), max(b1[1], b2[1])
+            ix2, iy2 = min(b1[2], b2[2]), min(b1[3], b2[3])
+            inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+            a1 = max(0.0, b1[2] - b1[0]) * max(0.0, b1[3] - b1[1])
+            a2 = max(0.0, b2[2] - b2[0]) * max(0.0, b2[3] - b2[1])
+            union = a1 + a2 - inter
+            return inter / (union + 1e-6) if union > 0 else 0.0
+
+        tracklets = []
+        for cand_idx in range(3):
+            track_boxes = []
+            track_scores = []
+            last_box = None
+
+            for t in range(10):
+                dets = frame_detections[t]
+                if not dets:
+                    track_boxes.append(last_box if last_box is not None else [0.0, 0.0, 0.0, 0.0])
+                    track_scores.append(0.0)
+                    continue
+
+                if last_box is None:
+                    # Select candidate by rank in frame 0
+                    chosen_idx = min(cand_idx, len(dets) - 1)
+                    chosen_det = dets[chosen_idx]
+                else:
+                    # Match to detection with highest IoU to last frame box
+                    best_iou = -1.0
+                    chosen_det = dets[0]
+                    for d in dets:
+                        iou = box_iou(last_box, d["box"])
+                        if iou > best_iou:
+                            best_iou = iou
+                            chosen_det = d
+
+                last_box = chosen_det["box"]
+                track_boxes.append(chosen_det["box"])
+                track_scores.append(chosen_det["score"])
+
+            mean_score = sum(track_scores) / len(track_scores) if track_scores else 0.0
+            tracklets.append(Candidate(
+                cand_id=cand_idx,
+                boxes=track_boxes,
+                masks=None,
+                score=round(mean_score, 3),
+                mean_area=round(self._compute_mean_area(track_boxes), 3),
+                side=self._compute_side(track_boxes)
+            ))
+
+        tracklets.sort(key=lambda c: c.score, reverse=True)
+        for i, c in enumerate(tracklets):
+            c.cand_id = i
+        return tracklets
+
+
 _default_referdino = None
+_default_gdino = None
 
 
 def get_referdino_tool(use_mock=False):
@@ -191,3 +295,12 @@ def get_referdino_tool(use_mock=False):
     if _default_referdino is None:
         _default_referdino = ReferDINOTool(use_mock=use_mock)
     return _default_referdino
+
+
+def get_grounding_tool(grounder="gdino", use_mock=False):
+    global _default_referdino, _default_gdino
+    if grounder == "referdino":
+        return get_referdino_tool(use_mock=use_mock)
+    if _default_gdino is None:
+        _default_gdino = GroundingDINOTool(use_mock=use_mock)
+    return _default_gdino

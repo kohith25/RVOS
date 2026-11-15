@@ -22,9 +22,11 @@ if _ROOT not in sys.path:
 
 from rl_grpo.arguments import RLGRPOArguments
 from rl_grpo.build_model import build_tgs_model
+from rl_grpo.model_adapter import TGSModelAdapter
 from rl_grpo.dataset_adapter import TGSRLDataset
 from rl_grpo.trainer.grpo_trainer_tgs_v2 import TGSGRPOTrainer
 from tools.client import get_tool_client
+from scripts.rl_grpo.check_format_validity import evaluate_format_validity
 
 
 def parse_args():
@@ -42,6 +44,9 @@ def parse_args():
     parser.add_argument("--device", type=str, default=None, help="Device (cuda or cpu)")
     parser.add_argument("--grounder", type=str, default="gdino", help="Grounder tool")
     parser.add_argument("--use_kg", type=str, default="false", help="Whether to use KG")
+    parser.add_argument("--skip_format_gate", action="store_true", help="Skip format validity gate check")
+    parser.add_argument("--max_new_tokens", type=int, default=160, help="Max new tokens per action turn")
+    parser.add_argument("--train_mm_modules", type=str, default="false", help="Whether to train multimodal modules")
     parser.add_argument("--use_mock", action="store_true", help="Run with mock models on CPU for testing")
     return parser.parse_args()
 
@@ -101,7 +106,21 @@ def main():
         print("[Notice] Using Mock Dataset for training.")
         train_dataset = MockDataset(size=20)
 
-    # 3. Setup GRPO Arguments
+    # 3. Format Validity Gate Check
+    if not args.skip_format_gate:
+        print("[Format Gate] Evaluating model action format validity before starting GRPO...")
+        adapter = TGSModelAdapter(model=policy_model, tokenizer=tokenizer, use_mock=is_mock)
+        val_samples = [train_dataset[i] for i in range(min(10, len(train_dataset)))]
+        valid_rate = evaluate_format_validity(adapter, val_samples, max_tokens=args.max_new_tokens)
+        print(f"[Format Gate] Validity rate: {valid_rate:.2%}")
+        if valid_rate < 0.95:
+            raise RuntimeError(
+                f"Model failed format validity gate ({valid_rate:.2%} < 95%). "
+                "Must undergo Action Format LoRA SFT before GRPO training can begin. "
+                "Pass --skip_format_gate to bypass."
+            )
+
+    # 4. Setup GRPO Arguments
     rl_args = RLGRPOArguments(
         max_steps=args.max_steps,
         num_generations=args.num_generations,

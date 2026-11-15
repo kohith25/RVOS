@@ -74,6 +74,13 @@ class TGSGRPOTrainer:
             max_turns=self.rl_args.max_turn
         )
 
+        # Freeze multimodal modules unless train_mm_modules is explicitly True
+        if not self.rl_args.train_mm_modules:
+            mm_substrings = ["projector", "qformer", "query_generator", "visual_query", "audio_query"]
+            for name, param in self.policy_model.named_parameters():
+                if any(sub in name.lower() for sub in mm_substrings):
+                    param.requires_grad = False
+
         # Optimizer
         self.optimizer = AdamW(
             [p for p in self.policy_model.parameters() if p.requires_grad],

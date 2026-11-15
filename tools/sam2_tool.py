@@ -9,7 +9,7 @@ Output masks match the original image's native resolution (10, H, W).
 """
 
 import os
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import numpy as np
 
 try:
@@ -68,9 +68,12 @@ class SAM2Tool:
         video_id: str,
         candidate_boxes: List[List[float]],
         keyframe: Optional[int] = None
-    ) -> np.ndarray:
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Generates 10 binary masks of shape (10, H, W) matching native video resolution.
+        Generates 10 binary masks and logits matching evaluation resolution.
+        Returns:
+            Tuple of (pred_masks, pred_logits) where pred_masks has shape (10, H, W)
+            and pred_logits has shape (10, 224, 224).
         """
         if self.use_mock:
             return self._mock_impl.refine(video_id, candidate_boxes, keyframe=keyframe)
@@ -93,17 +96,20 @@ class SAM2Tool:
             native_h, native_w = 224, 224
 
         pred_masks = []
+        pred_logits = []
         for img_id in range(10):
             img_path = os.path.join(frame_dir, f"{img_id}.jpg")
             box_norm = candidate_boxes[img_id] if img_id < len(candidate_boxes) else [0, 0, 0, 0]
 
             if not os.path.exists(img_path) or box_norm == [0, 0, 0, 0]:
                 pred_masks.append(np.zeros((native_h, native_w), dtype=np.uint8))
+                pred_logits.append(np.zeros((224, 224), dtype=np.float32))
                 continue
 
             image_bgr = cv2.imread(img_path) if cv2 is not None else None
             if image_bgr is None:
                 pred_masks.append(np.zeros((native_h, native_w), dtype=np.uint8))
+                pred_logits.append(np.zeros((224, 224), dtype=np.float32))
                 continue
 
             h, w = image_bgr.shape[:2]
@@ -127,10 +133,24 @@ class SAM2Tool:
 
             if masks is None or len(masks) == 0:
                 pred_masks.append(np.zeros((h, w), dtype=np.uint8))
+                pred_logits.append(np.zeros((224, 224), dtype=np.float32))
             else:
                 pred_masks.append(masks[0].astype(np.uint8))
+                if logits is not None and HAS_TORCH:
+                    import torch.nn.functional as F
+                    temp_l = logits if isinstance(logits, torch.Tensor) else torch.from_numpy(logits).float()
+                    temp_l = temp_l.cpu().squeeze(1)
+                    if temp_l.ndim == 2:
+                        temp_l = temp_l.unsqueeze(0).unsqueeze(0)
+                    elif temp_l.ndim == 3 and temp_l.shape[0] == 1:
+                        temp_l = temp_l.unsqueeze(0)
+                    interp_l = F.interpolate(temp_l, size=(224, 224), mode='bilinear', align_corners=False).squeeze(0).to(torch.float32)
+                    interp_l = torch.sigmoid(interp_l).squeeze(0).numpy()
+                    pred_logits.append(interp_l)
+                else:
+                    pred_logits.append(np.zeros((224, 224), dtype=np.float32))
 
-        return np.stack(pred_masks, axis=0)
+        return np.stack(pred_masks, axis=0), np.stack(pred_logits, axis=0)
 
 
 _default_sam2_tool = None

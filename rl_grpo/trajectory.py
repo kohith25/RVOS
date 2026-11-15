@@ -40,6 +40,7 @@ class TurnRecord:
     completion_ids: List[int]
     old_logps: List[float]
     pred_masks: Optional[np.ndarray] = None
+    pred_logits: Optional[np.ndarray] = None
     tool_cost: float = 0.0
 
 
@@ -49,7 +50,8 @@ class Trajectory:
     expression: str
     turns: List[TurnRecord]
     final_pred_masks: Optional[np.ndarray]
-    sam2_ious: List[float]
+    final_pred_logits: Optional[np.ndarray] = None
+    sam2_ious: List[float] = field(default_factory=list)
     reward_dict: Dict[str, float] = field(default_factory=dict)
     video_tensor: Optional[Any] = None
     audio_tensor: Optional[Any] = None
@@ -64,11 +66,13 @@ class TrajectoryCollector:
         self,
         model_adapter: TGSModelAdapter,
         tool_client: Optional[ToolClient] = None,
-        max_turns: int = 4
+        max_turns: int = 4,
+        use_kg: bool = True,
     ):
         self.model_adapter = model_adapter
         self.tool_client = tool_client if tool_client is not None else get_tool_client()
         self.max_turns = max_turns
+        self.use_kg = use_kg
 
     def rollout(
         self,
@@ -91,6 +95,7 @@ class TrajectoryCollector:
 
         current_candidates: List[Dict[str, Any]] = []
         final_pred_masks: Optional[np.ndarray] = None
+        final_pred_logits: Optional[np.ndarray] = None
         sam2_ious: List[float] = []
 
         for turn_idx in range(self.max_turns):
@@ -118,18 +123,29 @@ class TrajectoryCollector:
                 observation_text = f"Action Error: {model_action.error}. Please output valid JSON."
 
             elif action == "retrieve_evidence":
-                query = args.get("query", expression)
-                res = self.tool_client.retrieve_evidence(uid, query, k_hops=1)
-                observation_text = format_observation("retrieve_evidence", res)
+                if not self.use_kg:
+                    is_valid = False
+                    cost = 0.50
+                    observation_text = "Action Error: retrieve_evidence is disabled when --use_kg false. Do not call KG retrieval."
+                else:
+                    query = args.get("query", expression)
+                    res = self.tool_client.retrieve_evidence(uid, query, k_hops=1)
+                    observation_text = format_observation("retrieve_evidence", res)
 
             elif action == "inspect_frames":
                 start = args.get("start", 0)
                 end = args.get("end", 9)
-                # FIX 7(a): Return real window metadata: loudness, visible candidates, frame counts
-                kg_info = self.tool_client.kg_retrieve(uid, query="", k_hops=1)
-                audio_nodes = [n for n in kg_info.get("nodes", {}).values() if n.get("type") == "audio_event"]
-                range_loudness = [n.get("loudness", 0.0) for n in audio_nodes if start <= n.get("interval", [0])[0] <= end]
-                avg_loudness = round(sum(range_loudness) / len(range_loudness), 3) if range_loudness else 0.35
+                if self.use_kg:
+                    kg_info = self.tool_client.kg_retrieve(uid, query="", k_hops=1)
+                    audio_nodes = [n for n in kg_info.get("nodes", {}).values() if n.get("type") == "audio_event"]
+                    range_loudness = [n.get("loudness", 0.0) for n in audio_nodes if start <= n.get("interval", [0])[0] <= end]
+                    avg_loudness = round(sum(range_loudness) / len(range_loudness), 3) if range_loudness else 0.35
+                else:
+                    if audio_tensor is not None and hasattr(audio_tensor, "abs"):
+                        avg_loudness = round(float(audio_tensor.abs().mean().item()) * 10, 3)
+                    else:
+                        avg_loudness = 0.35
+
                 visible_cands = [c.get("cand_id") for c in current_candidates]
                 res = {
                     "start": start,
@@ -169,9 +185,11 @@ class TrajectoryCollector:
                     observation_text = f"Action Error: candidate_id {cand_id} was not produced by ReferDINO (available candidates: {[c.get('cand_id') for c in current_candidates]}). Call call_referdino first."
                     turn_pred_masks = None
                 else:
-                    raw_masks = self.tool_client.sam2_segment(uid, chosen_boxes)
+                    raw_masks, raw_logits = self.tool_client.sam2_segment(uid, chosen_boxes)
                     turn_pred_masks = np.array(raw_masks, dtype=np.uint8) if isinstance(raw_masks, list) else raw_masks
+                    turn_pred_logits = np.array(raw_logits, dtype=np.float32) if isinstance(raw_logits, list) else raw_logits
                     final_pred_masks = turn_pred_masks
+                    final_pred_logits = turn_pred_logits
 
                     # Compute SAM2 IoU for progressive reward tracking
                     if gt_masks is not None and not is_null and turn_pred_masks is not None:
@@ -198,6 +216,7 @@ class TrajectoryCollector:
                 completion_ids=model_action.completion_ids,
                 old_logps=model_action.old_logps,
                 pred_masks=turn_pred_masks,
+                pred_logits=turn_pred_logits if action == "call_sam2" else None,
                 tool_cost=cost
             )
             turns.append(turn_record)
@@ -229,6 +248,7 @@ class TrajectoryCollector:
             expression=expression,
             turns=turns,
             final_pred_masks=final_pred_masks,
+            final_pred_logits=final_pred_logits,
             sam2_ious=sam2_ious,
             reward_dict=reward_dict,
             video_tensor=video_tensor,

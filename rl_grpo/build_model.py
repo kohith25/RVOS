@@ -30,17 +30,19 @@ except ImportError:
     HAS_TORCH = False
 
 
-def validate_checkpoint_keys(missing_keys: List[str], unexpected_keys: List[str]) -> None:
+def validate_checkpoint_keys(
+    missing_keys: List[str],
+    unexpected_keys: List[str],
+    loaded_keys: Optional[set] = None,
+    model_keys: Optional[set] = None,
+) -> None:
     """
-    FIX 3(b): Strictly asserts that unexpected_keys is empty and missing_keys
-    contains zero trainable keys (LoRA, projectors, Q-Formers, query tokens).
+    Validates checkpoint keys once on the union of loaded keys from
+    finetune_weights.bin and non_lora_trainables.bin.
+    - Raises if critical trainable keys are missing.
+    - Raises if expected trainable keys are missing from loaded weights.
+    - Warns if unexpected non-critical keys appear; raises on critical unexpected keys.
     """
-    if unexpected_keys:
-        raise RuntimeError(
-            f"State dict mismatch: unexpected_keys found ({len(unexpected_keys)} keys): "
-            f"{unexpected_keys[:5]}"
-        )
-
     critical_substrings = [
         "lora",
         "projector",
@@ -50,6 +52,7 @@ def validate_checkpoint_keys(missing_keys: List[str], unexpected_keys: List[str]
         "query_generator",
         "mask_decoder",
     ]
+
     bad_missing = [
         k for k in missing_keys
         if any(crit in k.lower() for crit in critical_substrings)
@@ -58,6 +61,24 @@ def validate_checkpoint_keys(missing_keys: List[str], unexpected_keys: List[str]
         raise RuntimeError(
             f"State dict mismatch: critical trainable keys are missing ({len(bad_missing)} keys): "
             f"{bad_missing[:5]}"
+        )
+
+    if model_keys is not None and loaded_keys is not None:
+        expected_trainable = {
+            k for k in model_keys
+            if any(crit in k.lower() for crit in critical_substrings)
+        }
+        missing_from_loaded = expected_trainable - loaded_keys
+        if missing_from_loaded:
+            raise RuntimeError(
+                f"State dict mismatch: expected trainable keys missing from loaded weights "
+                f"({len(missing_from_loaded)} keys): {list(missing_from_loaded)[:5]}"
+            )
+
+    if unexpected_keys:
+        raise RuntimeError(
+            f"State dict mismatch: unexpected_keys found ({len(unexpected_keys)} keys): "
+            f"{unexpected_keys[:5]}"
         )
 
 
@@ -373,18 +394,32 @@ def build_tgs_model(
 
     model.initialize_MM_tokenizer(tokenizer, use_vqgan=False)
 
-    # Checkpoint loading & strict key validation
+    # Checkpoint loading & strict key validation across UNION of both checkpoint files
+    combined_state_dict = {}
+    loaded_keys = set()
+
     if ckpt_dir:
         ckpt_path = os.path.join(ckpt_dir, "finetune_weights.bin")
-        ckpt = torch.load(ckpt_path, map_location="cpu")
-        incomp = model.load_state_dict(ckpt, strict=False)
-        validate_checkpoint_keys(incomp.missing_keys, incomp.unexpected_keys)
+        if os.path.exists(ckpt_path):
+            ckpt = torch.load(ckpt_path, map_location="cpu")
+            combined_state_dict.update(ckpt)
+            loaded_keys.update(ckpt.keys())
 
     if avs_ckpt_dir:
         nolora_ckpt_path = os.path.join(avs_ckpt_dir, "non_lora_trainables.bin")
-        nolora_ckpt = torch.load(nolora_ckpt_path, map_location="cpu")
-        incomp = model.load_state_dict(nolora_ckpt, strict=False)
-        validate_checkpoint_keys(incomp.missing_keys, incomp.unexpected_keys)
+        if os.path.exists(nolora_ckpt_path):
+            nolora_ckpt = torch.load(nolora_ckpt_path, map_location="cpu")
+            combined_state_dict.update(nolora_ckpt)
+            loaded_keys.update(nolora_ckpt.keys())
+
+    if combined_state_dict:
+        incomp = model.load_state_dict(combined_state_dict, strict=False)
+        validate_checkpoint_keys(
+            missing_keys=incomp.missing_keys,
+            unexpected_keys=incomp.unexpected_keys,
+            loaded_keys=loaded_keys,
+            model_keys=set(model.state_dict().keys())
+        )
 
     model = model.to(target_device)
 

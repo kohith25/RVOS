@@ -15,7 +15,7 @@ import json
 import hashlib
 import urllib.request
 import urllib.error
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from tools.mock_tools import MockToolServer
 
@@ -79,7 +79,8 @@ class ToolClient:
         if endpoint == "referdino":
             result = {"candidates": mock.referdino_ground(payload.get("video_id"), payload.get("text"))}
         elif endpoint == "sam2":
-            result = {"masks": mock.sam2_segment(payload.get("video_id"), payload.get("candidate_boxes"), payload.get("keyframe"))}
+            masks, logits = mock.sam2_segment(payload.get("video_id"), payload.get("candidate_boxes"), payload.get("keyframe"))
+            result = {"masks": masks, "logits": logits}
         elif endpoint == "kg":
             result = mock.kg_retrieve(payload.get("video_id"), payload.get("query"), payload.get("k_hops", 1))
         else:
@@ -132,9 +133,9 @@ class ToolClient:
         resp = self._post("referdino", {"video_id": video_id, "text": text})
         return resp.get("candidates", [])
 
-    def sam2_segment(self, video_id: str, candidate_boxes: List[List[float]], keyframe: Optional[int] = None) -> List[List[List[int]]]:
+    def sam2_segment(self, video_id: str, candidate_boxes: List[List[float]], keyframe: Optional[int] = None) -> Tuple[List[List[List[int]]], List[List[List[float]]]]:
         resp = self._post("sam2", {"video_id": video_id, "candidate_boxes": candidate_boxes, "keyframe": keyframe})
-        return resp.get("masks", [])
+        return resp.get("masks", []), resp.get("logits", [])
 
     def kg_retrieve(self, video_id: str, query: str, k_hops: int = 1) -> Dict[str, Any]:
         return self._post("kg", {"video_id": video_id, "query": query, "k_hops": k_hops})

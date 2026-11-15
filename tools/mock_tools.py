@@ -9,7 +9,7 @@ These are invoked ONLY when --mock is passed explicitly.
 import os
 import hashlib
 from dataclasses import dataclass, asdict
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import numpy as np
 
 try:
@@ -147,13 +147,17 @@ class MockSAM2Tool:
             mask[y1:y2, x1:x2] = 1
         return mask
 
-    def refine(self, video_id: str, candidate_boxes: List[List[float]], keyframe: Optional[int] = None) -> np.ndarray:
+    def refine(self, video_id: str, candidate_boxes: List[List[float]], keyframe: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
         masks = []
+        logits = []
         for t in range(10):
             box = candidate_boxes[t] if t < len(candidate_boxes) else [0, 0, 0, 0]
             m = self.rasterize_box_to_mask(box, shape=(224, 224))
             masks.append(m)
-        return np.stack(masks, axis=0)
+            # Sigmoid-equivalent logits: 0.9 inside mask, 0.1 outside
+            l = np.where(m > 0, 0.9, 0.1).astype(np.float32)
+            logits.append(l)
+        return np.stack(masks, axis=0), np.stack(logits, axis=0)
 
 
 class MockToolServer:
@@ -168,9 +172,9 @@ class MockToolServer:
         candidates = self.referdino.run(video_id, text)
         return [c.to_dict() for c in candidates]
 
-    def sam2_segment(self, video_id: str, candidate_boxes: List[List[float]], keyframe: Optional[int] = None) -> List[List[List[int]]]:
-        masks_arr = self.sam2.refine(video_id, candidate_boxes, keyframe=keyframe)
-        return masks_arr.tolist()
+    def sam2_segment(self, video_id: str, candidate_boxes: List[List[float]], keyframe: Optional[int] = None) -> Tuple[List[List[List[int]]], List[List[List[float]]]]:
+        masks_arr, logits_arr = self.sam2.refine(video_id, candidate_boxes, keyframe=keyframe)
+        return masks_arr.tolist(), logits_arr.tolist()
 
     def kg_retrieve(self, video_id: str, query: str, k_hops: int = 1) -> Dict[str, Any]:
         return retrieve(video_id, query, k_hops=k_hops, kg_dir=self.kg_dir)

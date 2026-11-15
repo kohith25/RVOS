@@ -56,7 +56,8 @@ class TGSModelAdapter:
             self.device = device
         self.use_mock = use_mock or (model is None)
 
-    def build_turn_prompt(self, expression: str, history: List[Dict[str, Any]]) -> str:
+    @staticmethod
+    def build_turn_prompt(expression: str, history: Optional[List[Dict[str, Any]]] = None) -> str:
         """
         Constructs the conversational prompt containing multimodal start/end tokens,
         referring expression, system instruction, and multi-turn observation history.
@@ -170,18 +171,23 @@ class TGSModelAdapter:
 
         try:
             # Generate through Ref-Thinker
-            outputs = self.model.generate(
-                batch_input_ids=batch_input_ids,
-                batch_labels=batch_labels,
-                batch_X_modals=batch_X_modals,
-                batch_task_names=['ref-avs'],
-                do_sample=True,
-                temperature=temperature,
-                top_p=top_p,
-                max_new_tokens=max_new_tokens,
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-            )
+            gen_kwargs = {
+                "batch_input_ids": batch_input_ids,
+                "batch_labels": batch_labels,
+                "batch_X_modals": batch_X_modals,
+                "batch_task_names": ['ref-avs'],
+                "max_new_tokens": max_new_tokens,
+                "pad_token_id": self.tokenizer.pad_token_id,
+                "eos_token_id": self.tokenizer.eos_token_id,
+            }
+            if temperature > 0.0:
+                gen_kwargs["do_sample"] = True
+                gen_kwargs["temperature"] = temperature
+                gen_kwargs["top_p"] = top_p
+            else:
+                gen_kwargs["do_sample"] = False
+
+            outputs = self.model.generate(**gen_kwargs)
 
             # Slicing: newly generated completion tokens
             if hasattr(outputs, "sequences"):

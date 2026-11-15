@@ -41,3 +41,6 @@ class RLGRPOArguments:
     # Logging and checkpointing.
     logging_steps: int = field(default=10)
     save_steps: int = field(default=200)
+
+    # Multimodal freezing
+    train_mm_modules: bool = field(default=False)

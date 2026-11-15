@@ -369,5 +369,80 @@ def test_metric_mapping_test_n():
         assert res_data["metrics"]["S_null"] == 0.8421
 
 
+def test_dry_run_leaves_zero_files():
+    """Verify that --dry_run creates ZERO temporary files in ground_segment_scripts."""
+    ground_dir = os.path.join(REPO_ROOT, "ground_segment_scripts")
+    files_before = set(os.listdir(ground_dir))
+
+    args = DummyArgs(
+        use_rl=False,
+        stage="eval",
+        test_name="test_s",
+        benchmark="refavs",
+        ckpt_dir="dummy/ckpt",
+        out_dir="dummy/out",
+        dry_run=True,
+    )
+    run_use_rl_false(args)
+
+    files_after = set(os.listdir(ground_dir))
+    diff_files = files_after - files_before
+    assert len(diff_files) == 0, f"Dry run left temporary files: {diff_files}"
+
+
+def test_eval_stage_missing_jsonl_raises():
+    """Verify that running --stage eval without JSONL at either location raises FileNotFoundError."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        args = DummyArgs(
+            use_rl=False,
+            stage="eval",
+            test_name="test_s",
+            benchmark="refavs",
+            ckpt_dir=os.path.join(tmp_dir, "nonexistent_ckpt"),
+            out_dir=os.path.join(tmp_dir, "nonexistent_out"),
+            dry_run=False,
+        )
+        with pytest.raises(FileNotFoundError, match="Inference JSONL not found"):
+            run_use_rl_false(args)
+
+
+def test_jsonl_overwritten_on_rerun():
+    """Verify that fresh inference_results.jsonl from ckpt_dir overwrites stale output."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        ckpt_dir = os.path.join(tmp_dir, "ckpt")
+        out_dir = os.path.join(tmp_dir, "out")
+        jsonl_subdir = os.path.join(ckpt_dir, "inference_cot_ref_avs_test_s_bs")
+        os.makedirs(jsonl_subdir, exist_ok=True)
+
+        fresh_jsonl = os.path.join(jsonl_subdir, "inference_results.jsonl")
+        with open(fresh_jsonl, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"video_id": "fresh_video"}) + "\n")
+
+        # Create stale file in out_dir
+        out_subdir = os.path.join(out_dir, "inference_cot_ref_avs_test_s_bs")
+        os.makedirs(out_subdir, exist_ok=True)
+        stale_jsonl = os.path.join(out_subdir, "inference_results.jsonl")
+        with open(stale_jsonl, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"video_id": "stale_video"}) + "\n")
+
+        args = DummyArgs(
+            use_rl=False,
+            stage="infer",
+            test_name="test_s",
+            benchmark="refavs",
+            ckpt_dir=ckpt_dir,
+            out_dir=out_dir,
+            dry_run=False,
+        )
+
+        with patch("scripts.run_pipeline.subprocess.run") as mock_sub:
+            mock_sub.return_value = MagicMock(returncode=0)
+            run_use_rl_false(args)
+
+        with open(stale_jsonl, "r", encoding="utf-8") as f:
+            data = json.loads(f.read().strip())
+        assert data["video_id"] == "fresh_video", "Stale JSONL was not overwritten!"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -99,16 +99,19 @@ def test_referdino_tool():
 
 
 def test_sam2_tool():
-    """Verify SAM2 mask refinement."""
+    """Verify SAM2 mask and logit refinement."""
     tool = SAM2Tool(use_mock=True)
     dummy_boxes = [[0.2, 0.2, 0.6, 0.6]] * 10
-    masks = tool.refine("test_vid_01", dummy_boxes)
+    masks, logits = tool.refine("test_vid_01", dummy_boxes)
 
     assert isinstance(masks, np.ndarray)
     assert masks.shape == (10, 224, 224)
     assert masks.dtype == np.uint8
-    # Should have non-zero mask pixels inside the box
     assert masks.sum() > 0
+
+    assert isinstance(logits, np.ndarray)
+    assert logits.shape == (10, 224, 224)
+    assert logits.dtype == np.float32
 
 
 def test_kg_retriever():
@@ -183,6 +186,65 @@ def test_tools_raise_without_mock_when_weights_missing():
 
     with pytest.raises((FileNotFoundError, RuntimeError)):
         SAM2Tool(sam2_checkpoint="./nonexistent_sam2_ckpt.pt", use_mock=False)
+
+
+def test_kg_audioset_labels_and_classes():
+    """Verify that KG audio nodes carry real AudioSet class names."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        g = build_graph("video_guitar_acoustic_789", kg_dir=tmp_dir)
+        audio_nodes = [n for n in g["nodes"].values() if n["type"] == "audio_event"]
+        assert len(audio_nodes) > 0
+        for an in audio_nodes:
+            assert "class_name" in an
+            assert isinstance(an["class_name"], str)
+            assert len(an["class_name"]) > 0
+
+
+def test_use_kg_false_rejection_in_trajectory():
+    """Verify that when use_kg=False, retrieve_evidence action is marked invalid."""
+    from rl_grpo.trajectory import TrajectoryCollector
+    from rl_grpo.model_adapter import TGSModelAdapter, ModelAction
+
+    class FakeAdapter:
+        def sample_action(self, *args, **kwargs):
+            return ModelAction(
+                action_dict={"thought": "find kg", "action": "retrieve_evidence", "args": {"query": "dog"}},
+                action_name="retrieve_evidence",
+                args={"query": "dog"},
+                thought="find kg",
+                raw_text='{"thought": "find kg", "action": "retrieve_evidence", "args": {"query": "dog"}}',
+                is_valid=True,
+                error=None,
+                prompt_ids=[1],
+                completion_ids=[2],
+                old_logps=[-0.1]
+            )
+
+    collector = TrajectoryCollector(model_adapter=FakeAdapter(), use_kg=False, max_turns=1)
+    sample = {"uid": "test_sample_01", "expression": "dog", "video": None, "audio": None}
+    traj = collector.rollout(sample)
+
+    assert len(traj.turns) == 1
+    t0 = traj.turns[0]
+    assert t0.action == "retrieve_evidence"
+    assert t0.is_valid is False
+    assert "disabled when --use_kg false" in t0.observation
+
+
+def test_grounding_tool_switch():
+    """Verify grounder switch between gdino and referdino."""
+    from tools.referdino_tool import get_grounding_tool
+
+    gdino_tool = get_grounding_tool("gdino", use_mock=True)
+    referdino_tool = get_grounding_tool("referdino", use_mock=True)
+
+    cands_g = gdino_tool.run("test_vid", "a dog")
+    cands_r = referdino_tool.run("test_vid", "a dog")
+
+    assert len(cands_g) > 0
+    assert len(cands_r) > 0
+    assert hasattr(cands_g[0], "boxes")
+    assert hasattr(cands_r[0], "boxes")
 
 
 if __name__ == "__main__":

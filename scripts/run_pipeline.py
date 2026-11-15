@@ -76,8 +76,8 @@ def parse_args():
                         help="Whether to ground using f_object instead of s_object")
     parser.add_argument("--save_pred_mask", type=parse_bool, default=False,
                         help="Whether to save visualized predicted masks to disk")
-    parser.add_argument("--media_dir", type=str, default="./REFAVS/media", help="Path to media directory")
-    parser.add_argument("--gt_mask_dir", type=str, default="./REFAVS/gt_mask", help="Path to ground truth masks")
+    parser.add_argument("--media_dir", type=str, default=None, help="Path to media directory (optional override)")
+    parser.add_argument("--gt_mask_dir", type=str, default=None, help="Path to ground truth masks (optional override)")
     parser.add_argument("--meta_csv_path", type=str, default=None, help="Path to metadata CSV (optional override)")
 
     # LLM / multimodal model args for inference
@@ -98,7 +98,23 @@ def parse_args():
     parser.add_argument("--mock", action="store_true",
                         help="Explicit flag to run with mock models/tools for testing on CPU")
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # Resolve all user-supplied paths against launch cwd
+    if args.out_dir is not None:
+        args.out_dir = os.path.abspath(args.out_dir)
+    if args.ckpt_dir is not None:
+        args.ckpt_dir = os.path.abspath(args.ckpt_dir)
+    if args.avs_ckpt_dir is not None:
+        args.avs_ckpt_dir = os.path.abspath(args.avs_ckpt_dir)
+    if args.media_dir is not None:
+        args.media_dir = os.path.abspath(args.media_dir)
+    if args.gt_mask_dir is not None:
+        args.gt_mask_dir = os.path.abspath(args.gt_mask_dir)
+    if args.meta_csv_path is not None:
+        args.meta_csv_path = os.path.abspath(args.meta_csv_path)
+
+    return args
 
 
 def validate_args(args):
@@ -222,40 +238,36 @@ def run_use_rl_false(args):
         ]
         run_command_or_dry_run(think_cmd, dry_run=args.dry_run, cwd=REPO_ROOT)
 
-        # FIX 2(a): If not dry run, check for jsonl at ckpt_dir and copy to out_dir
+        # FIX 2(a): If not dry run, check for jsonl at ckpt_dir and copy to out_dir (ALWAYS overwrite stale)
         if not args.dry_run:
             orig_think_jsonl = os.path.join(args.ckpt_dir, dir_name, "inference_results.jsonl")
-            if os.path.exists(orig_think_jsonl) and not os.path.exists(jsonl_output_path):
+            if os.path.exists(orig_think_jsonl):
                 shutil.copyfile(orig_think_jsonl, jsonl_output_path)
 
     # Stage 2: Ground & Segment & Evaluate
     if args.stage in ("eval", "all"):
         print("\n=== [Original TGS-Agent] Running Ground/Segment Phase (GroundingDINO + SAM2) ===")
-        # FIX 2(a): Ensure jsonl exists in out_dir or copy from ckpt_dir
+        orig_think_jsonl = os.path.join(args.ckpt_dir, dir_name, "inference_results.jsonl")
+
+        # Copy from ckpt_dir if missing in out_dir
+        if not os.path.exists(jsonl_output_path) and os.path.exists(orig_think_jsonl):
+            shutil.copyfile(orig_think_jsonl, jsonl_output_path)
+
         if not args.dry_run and not os.path.exists(jsonl_output_path):
-            orig_think_jsonl = os.path.join(args.ckpt_dir, dir_name, "inference_results.jsonl")
-            if os.path.exists(orig_think_jsonl):
-                shutil.copyfile(orig_think_jsonl, jsonl_output_path)
+            raise FileNotFoundError(
+                f"Inference JSONL not found at '{jsonl_output_path}' or '{orig_think_jsonl}'. "
+                "Run with --stage infer first or ensure the checkpoint contains inference_results.jsonl."
+            )
 
         if args.benchmark == "refavs":
             orig_ground_script_rel = os.path.join("ground_segment_scripts", "ground_segment_with_object_text_after_thinking_for_RefAVSBench.py")
-            default_meta_csv = "./R2AVSBench/RefAVSBench_metadata.csv"
         else:
             orig_ground_script_rel = os.path.join("ground_segment_scripts", "ground_segment_with_object_text_after_thinking_for_R2AVSBench.py")
-            default_meta_csv = "./R2AVSBench/R2AVSBench_metadata.csv"
 
         orig_ground_script = os.path.join(REPO_ROOT, orig_ground_script_rel)
-        meta_csv = args.meta_csv_path if args.meta_csv_path else default_meta_csv
 
-        # FIX 2(c): Temp copy placed in ground_segment_scripts so imports and configs resolve as shipped
-        temp_script_name = f"_tmp_eval_{args.benchmark}_{args.test_name}_{uuid.uuid4().hex[:8]}.py"
-        temp_script_path = os.path.join(REPO_ROOT, "ground_segment_scripts", temp_script_name)
-
-        # Standardize paths with forward slashes
+        # Standardize paths with forward slashes for cross-platform compatibility
         norm_jsonl = jsonl_output_path.replace("\\", "/")
-        norm_media = args.media_dir.replace("\\", "/")
-        norm_gt = args.gt_mask_dir.replace("\\", "/")
-        norm_meta = meta_csv.replace("\\", "/")
 
         replacements = {
             r'JSONL_PATH\s*=\s*["\'].*?["\']': f'JSONL_PATH = "{norm_jsonl}"',
@@ -263,10 +275,31 @@ def run_use_rl_false(args):
             r'TEXT_THRESHOLD\s*=\s*[0-9.]+': f'TEXT_THRESHOLD = {args.text_threshold}',
             r'USE_F_OBJECT\s*=\s*(True|False)': f'USE_F_OBJECT = {args.use_f_object}',
             r'SAVE_PRED_MASK\s*=\s*(True|False)': f'SAVE_PRED_MASK = {args.save_pred_mask}',
-            r'MEDIA_DIR\s*=\s*["\'].*?["\']': f'MEDIA_DIR = "{norm_media}"',
-            r'GT_MASK_DIR\s*=\s*["\'].*?["\']': f'GT_MASK_DIR = "{norm_gt}"',
-            r'META_CSV_PATH\s*=\s*["\'].*?["\']': f'META_CSV_PATH = "{norm_meta}"',
         }
+
+        # For data paths the user did not pass (None), do NOT add regex replacements, preserving original constants
+        if args.media_dir is not None:
+            norm_media = args.media_dir.replace("\\", "/")
+            replacements[r'MEDIA_DIR\s*=\s*["\'].*?["\']'] = f'MEDIA_DIR = "{norm_media}"'
+        if args.gt_mask_dir is not None:
+            norm_gt = args.gt_mask_dir.replace("\\", "/")
+            replacements[r'GT_MASK_DIR\s*=\s*["\'].*?["\']'] = f'GT_MASK_DIR = "{norm_gt}"'
+        if args.meta_csv_path is not None:
+            norm_meta = args.meta_csv_path.replace("\\", "/")
+            replacements[r'META_CSV_PATH\s*=\s*["\'].*?["\']'] = f'META_CSV_PATH = "{norm_meta}"'
+
+        temp_script_name = f"_tmp_eval_{args.benchmark}_{args.test_name}_{uuid.uuid4().hex[:8]}.py"
+        temp_script_path = os.path.join(REPO_ROOT, "ground_segment_scripts", temp_script_name)
+
+        # FIX: In dry_run mode, write NO files to disk!
+        if args.dry_run:
+            print(f"[DRY RUN] Would rewrite {orig_ground_script} into temporary script with replacements:")
+            for pat, val in replacements.items():
+                print(f"  {pat} => {val}")
+            dino_cmd = build_command_prefix(args.conda_env_dino) + [temp_script_name]
+            ground_cwd = os.path.join(REPO_ROOT, "ground_segment_scripts")
+            run_command_or_dry_run(dino_cmd, dry_run=True, cwd=ground_cwd)
+            return
 
         try:
             rewrite_ground_segment_script(orig_ground_script, temp_script_path, replacements)
@@ -279,7 +312,7 @@ def run_use_rl_false(args):
 
             dino_cmd = build_command_prefix(args.conda_env_dino) + [temp_script_name]
             ground_cwd = os.path.join(REPO_ROOT, "ground_segment_scripts")
-            run_command_or_dry_run(dino_cmd, dry_run=args.dry_run, cwd=ground_cwd, env=env)
+            run_command_or_dry_run(dino_cmd, dry_run=False, cwd=ground_cwd, env=env)
 
             # Locate the generated metric json
             tag_name = "f_object" if args.use_f_object else "s_object"
@@ -289,7 +322,7 @@ def run_use_rl_false(args):
 
             metric_json_path = os.path.join(expected_out_jsonl_dir, expected_metric_name)
 
-            if not args.dry_run and os.path.exists(metric_json_path):
+            if os.path.exists(metric_json_path):
                 with open(metric_json_path, "r", encoding="utf-8") as f:
                     raw_metrics = json.load(f)
 
@@ -336,7 +369,7 @@ def run_use_rl_false(args):
                 print(f"[SUCCESS] Wrote standardized evaluation schema to: {standard_out_file}")
 
         finally:
-            if not args.dry_run and os.path.exists(temp_script_path):
+            if os.path.exists(temp_script_path):
                 os.remove(temp_script_path)
 
 

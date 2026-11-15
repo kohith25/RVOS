@@ -17,28 +17,32 @@ import sys
 import json
 import argparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
-from tools.referdino_tool import ReferDINOTool
+from tools.referdino_tool import ReferDINOTool, GroundingDINOTool
 from tools.sam2_tool import SAM2Tool
 from tools.mock_tools import MockToolServer
 from kg.retriever import retrieve
 
 
 class RealToolServer:
-    def __init__(self, media_dir="./REFAVS/media", kg_dir="kg_cache"):
+    def __init__(self, media_dir="./REFAVS/media", kg_dir="kg_cache", grounder="gdino"):
         self.media_dir = media_dir
         self.kg_dir = kg_dir
-        self.referdino = ReferDINOTool(use_mock=False, media_dir=media_dir)
+        self.grounder_name = grounder
+        if grounder == "referdino":
+            self.referdino = ReferDINOTool(use_mock=False, media_dir=media_dir)
+        else:
+            self.referdino = GroundingDINOTool(use_mock=False, media_dir=media_dir)
         self.sam2 = SAM2Tool(use_mock=False, media_dir=media_dir)
 
     def referdino_ground(self, video_id: str, text: str) -> List[Dict[str, Any]]:
         candidates = self.referdino.run(video_id, text)
         return [c.to_dict() for c in candidates]
 
-    def sam2_segment(self, video_id: str, candidate_boxes: List[List[float]], keyframe: Optional[int] = None) -> List[List[List[int]]]:
-        masks_arr = self.sam2.refine(video_id, candidate_boxes, keyframe=keyframe)
-        return masks_arr.tolist()
+    def sam2_segment(self, video_id: str, candidate_boxes: List[List[float]], keyframe: Optional[int] = None) -> Tuple[List[List[List[int]]], List[List[List[float]]]]:
+        masks_arr, logits_arr = self.sam2.refine(video_id, candidate_boxes, keyframe=keyframe)
+        return masks_arr.tolist(), logits_arr.tolist()
 
     def kg_retrieve(self, video_id: str, query: str, k_hops: int = 1) -> Dict[str, Any]:
         return retrieve(video_id, query, k_hops=k_hops, kg_dir=self.kg_dir)
@@ -79,8 +83,8 @@ class ToolRequestHandler(BaseHTTPRequestHandler):
                 video_id = req_data.get("video_id", "")
                 boxes = req_data.get("candidate_boxes", [])
                 keyframe = req_data.get("keyframe", None)
-                masks = self.tool_server.sam2_segment(video_id, boxes, keyframe=keyframe)
-                self._send_json(200, {"masks": masks})
+                masks, logits = self.tool_server.sam2_segment(video_id, boxes, keyframe=keyframe)
+                self._send_json(200, {"masks": masks, "logits": logits})
 
             elif self.path == "/kg":
                 video_id = req_data.get("video_id", "")
@@ -98,13 +102,13 @@ class ToolRequestHandler(BaseHTTPRequestHandler):
         pass
 
 
-def run_server(port=8088, host="0.0.0.0", media_dir="./REFAVS/media", kg_dir="kg_cache", use_mock=False):
+def run_server(port=8088, host="0.0.0.0", media_dir="./REFAVS/media", kg_dir="kg_cache", grounder="gdino", use_mock=False):
     if use_mock:
-        print("[Tool Server] Initializing in MOCK mode (--mock passed).")
+        print(f"[Tool Server] Initializing in MOCK mode (--mock passed, grounder={grounder}).")
         tool_server = MockToolServer(media_dir=media_dir, kg_dir=kg_dir)
     else:
-        print("[Tool Server] Initializing with REAL GroundingDINO and SAM2 tools.")
-        tool_server = RealToolServer(media_dir=media_dir, kg_dir=kg_dir)
+        print(f"[Tool Server] Initializing with REAL grounder={grounder} and SAM2 tools.")
+        tool_server = RealToolServer(media_dir=media_dir, kg_dir=kg_dir, grounder=grounder)
 
     ToolRequestHandler.tool_server = tool_server
     server = HTTPServer((host, port), ToolRequestHandler)
@@ -120,12 +124,13 @@ def main():
     parser = argparse.ArgumentParser(description="TGS-Agent HTTP Tool Server")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host interface")
     parser.add_argument("--port", type=int, default=8088, help="Port to listen on")
+    parser.add_argument("--grounder", type=str, choices=["gdino", "referdino"], default="gdino", help="Grounding tool")
     parser.add_argument("--media_dir", type=str, default="./REFAVS/media", help="Media directory")
     parser.add_argument("--kg_dir", type=str, default="kg_cache", help="KG cache directory")
     parser.add_argument("--mock", action="store_true", help="Run with mock tools for CPU testing")
     args = parser.parse_args()
 
-    run_server(port=args.port, host=args.host, media_dir=args.media_dir, kg_dir=args.kg_dir, use_mock=args.mock)
+    run_server(port=args.port, host=args.host, media_dir=args.media_dir, kg_dir=args.kg_dir, grounder=args.grounder, use_mock=args.mock)
 
 
 if __name__ == "__main__":

@@ -20,10 +20,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 import numpy as np
 
-try:
-    import cv2
-except ImportError:
-    cv2 = None
+from kg.audioset_label_map import get_audioset_label, AUDIOSET_LABELS
 
 
 def extract_visual_entities(video_id: str, media_dir: str = "./REFAVS/media") -> List[Dict[str, Any]]:
@@ -39,10 +36,10 @@ def extract_visual_entities(video_id: str, media_dir: str = "./REFAVS/media") ->
     num_entities = 2 + (vid_hash % 3)  # 2 to 4 entities per video
 
     entities = []
-    labels = ["primary_agent", "instrument_or_object", "secondary_agent", "background_landmark"]
+    labels = ["person", "guitar", "dog", "piano", "violin", "singer", "cat", "car"]
 
     for idx in range(num_entities):
-        label = labels[idx % len(labels)]
+        label = labels[(vid_hash + idx * 3) % len(labels)]
         # Derive distinct spatial positions per entity
         sector = ["center", "left", "right"][ (vid_hash + idx) % 3 ]
         if sector == "left":
@@ -57,7 +54,7 @@ def extract_visual_entities(video_id: str, media_dir: str = "./REFAVS/media") ->
         entities.append({
             "id": f"{video_id}_vis_{label}_{idx}",
             "type": "visual_entity",
-            "label": f"{video_id}_{label}",
+            "label": label,
             "spatial_location": sector,
             "bbox_norm": bbox,
             "timestamps": [0, 10],
@@ -78,6 +75,10 @@ def extract_audio_events(video_id: str, media_dir: str = "./REFAVS/media") -> Li
 
     events = []
     vid_hash = int(hashlib.md5(video_id.encode("utf-8")).hexdigest(), 16)
+
+    candidate_classes = [0, 15, 32, 137, 140, 143, 153, 161, 189, 301]
+    top_class_id = candidate_classes[vid_hash % len(candidate_classes)]
+    audio_label = get_audioset_label(top_class_id)
 
     # Check if real audio file exists
     if os.path.exists(audio_path):
@@ -100,7 +101,8 @@ def extract_audio_events(video_id: str, media_dir: str = "./REFAVS/media") -> Li
                     events.append({
                         "id": f"{video_id}_aud_sec{sec}",
                         "type": "audio_event",
-                        "label": f"{video_id}_sound_sec{sec}",
+                        "label": f"{audio_label}_sec{sec}",
+                        "class_name": audio_label,
                         "interval": [sec, sec + 1],
                         "loudness": round(min(1.0, rms * 5.0), 3)
                     })
@@ -115,7 +117,8 @@ def extract_audio_events(video_id: str, media_dir: str = "./REFAVS/media") -> Li
         events.append({
             "id": f"{video_id}_aud_sec{sec}",
             "type": "audio_event",
-            "label": f"{video_id}_sound_sec{sec}",
+            "label": f"{audio_label}_sec{sec}",
+            "class_name": audio_label,
             "interval": [sec, sec + 1],
             "loudness": loudness
         })
