@@ -178,4 +178,15 @@ class MockToolServer:
         return masks_arr.tolist(), logits_arr.tolist()
 
     def kg_retrieve(self, video_id: str, query: str, k_hops: int = 1) -> Dict[str, Any]:
-        return retrieve(video_id, query, k_hops=k_hops, kg_dir=self.kg_dir)
+        try:
+            return retrieve(video_id, query, k_hops=k_hops, kg_dir=self.kg_dir)
+        except Exception:
+            # Mock fallback strictly inside mock_tools when media or real KG is absent
+            return {
+                "facts": [
+                    f"Visual entity '{query}' localized in video frames",
+                    "Acoustic event active across sequence",
+                    f"Entity [{query}] detected at center region (occupies ~15% frame area).",
+                ],
+                "node_ids": [f"{video_id}_vis_0", f"{video_id}_aud_sec0"],
+            }

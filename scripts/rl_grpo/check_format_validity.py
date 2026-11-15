@@ -26,12 +26,16 @@ from rl_grpo.constants import parse_and_validate_action
 
 def evaluate_format_validity(model_adapter: TGSModelAdapter, samples: List[Dict[str, Any]], max_tokens: int = 160) -> float:
     """
-    Samples policy outputs and measures the proportion of strictly valid action JSONs.
+    Samples policy outputs, measures the proportion of strictly valid action JSONs,
+    and prints a detailed per-action-type validity breakdown.
     """
     valid_count = 0
     total_count = len(samples)
     if total_count == 0:
         return 0.0
+
+    action_counts: Dict[str, int] = {}
+    valid_per_action: Dict[str, int] = {}
 
     for idx, sample in enumerate(samples):
         expression = sample.get("expression") or sample.get("ref", "")
@@ -44,10 +48,20 @@ def evaluate_format_validity(model_adapter: TGSModelAdapter, samples: List[Dict[
             temperature=0.0,
             max_new_tokens=max_tokens,
         )
+        act_name = action.action_name or "unknown"
+        action_counts[act_name] = action_counts.get(act_name, 0) + 1
+
         if action.is_valid:
             valid_count += 1
+            valid_per_action[act_name] = valid_per_action.get(act_name, 0) + 1
 
     validity_rate = valid_count / total_count
+
+    print(f"\n[Format Gate Breakdown] Total: {valid_count}/{total_count} ({validity_rate:.2%})")
+    for act, cnt in sorted(action_counts.items()):
+        val_cnt = valid_per_action.get(act, 0)
+        print(f"  - Action '{act}': {val_cnt}/{cnt} valid")
+
     return validity_rate
 
 
