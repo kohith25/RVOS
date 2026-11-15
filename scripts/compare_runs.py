@@ -17,6 +17,13 @@ import csv
 from pathlib import Path
 
 
+_MOCK_VIDEO_PREFIXES = ("mock_", "MOCK_", "synthetic_", "SYNTHETIC_")
+
+
+def _is_mock_video(uid: str) -> bool:
+    return any(uid.startswith(p) for p in _MOCK_VIDEO_PREFIXES)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Compare two TGS-Agent pipeline evaluation runs")
     parser.add_argument("--run1", type=str, required=True, help="Directory of run 1 (typically use_rl=false)")
@@ -24,15 +31,30 @@ def parse_args():
     parser.add_argument("--label1", type=str, default="Original TGS", help="Label for run 1")
     parser.add_argument("--label2", type=str, default="RL GRPO", help="Label for run 2")
     parser.add_argument("--out_dir", type=str, default=None, help="Output directory to save summary files (defaults to run2)")
+    parser.add_argument(
+        "--allow_mock", action="store_true", default=False,
+        help="Allow mock/synthetic video IDs in results. Without this flag, any mock video ID causes an error."
+    )
     return parser.parse_args()
 
 
-def load_results(dir_path):
+def load_results(dir_path, allow_mock=False):
     results_path = os.path.join(dir_path, "results.json")
     if not os.path.exists(results_path):
         raise FileNotFoundError(f"results.json not found in directory: {dir_path}")
     with open(results_path, "r", encoding="utf-8") as f:
         data = json.load(f)
+
+    # Reject mock/synthetic video IDs unless --allow_mock is passed
+    per_video = data.get("per_video", {})
+    if not allow_mock:
+        mock_ids = [uid for uid in per_video if _is_mock_video(uid)]
+        if mock_ids:
+            raise ValueError(
+                f"results.json in {dir_path} contains {len(mock_ids)} mock/synthetic video ID(s): "
+                f"{mock_ids[:3]}{'...' if len(mock_ids) > 3 else ''}. "
+                "Re-run with --allow_mock to include mock results, or use real pipeline output."
+            )
 
     # FIX 6(b): Reject empty or placeholder runs
     per_video = data.get("per_video", {})
@@ -58,8 +80,8 @@ def main():
     out_dir = args.out_dir if args.out_dir else args.run2
     os.makedirs(out_dir, exist_ok=True)
 
-    data1 = load_results(args.run1)
-    data2 = load_results(args.run2)
+    data1 = load_results(args.run1, allow_mock=args.allow_mock)
+    data2 = load_results(args.run2, allow_mock=args.allow_mock)
 
     m1 = data1.get("metrics", {})
     m2 = data2.get("metrics", {})

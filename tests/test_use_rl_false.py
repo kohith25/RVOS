@@ -444,5 +444,49 @@ def test_jsonl_overwritten_on_rerun():
         assert data["video_id"] == "fresh_video", "Stale JSONL was not overwritten!"
 
 
+def test_compare_runs_mock_rejection_and_allow_mock():
+    """Verify that compare_runs rejects mock video IDs unless --allow_mock is passed."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        dir1 = os.path.join(tmp_dir, "run1")
+        dir2 = os.path.join(tmp_dir, "run2")
+        os.makedirs(dir1, exist_ok=True)
+        os.makedirs(dir2, exist_ok=True)
+
+        res_mock = {
+            "pipeline": "rl_grpo",
+            "use_rl": True,
+            "benchmark": "refavs",
+            "test_name": "test_s",
+            "metrics": {"J": 0.50, "F": 0.50, "J_and_F": 0.50, "S_null": 0.0},
+            "per_video": {
+                "mock_video_001": {"vid": "mock_video_001", "s_mean_iou": 0.50, "s_fscore": 0.50}
+            }
+        }
+        res_real = {
+            "pipeline": "original_tgs",
+            "use_rl": False,
+            "benchmark": "refavs",
+            "test_name": "test_s",
+            "metrics": {"J": 0.55, "F": 0.55, "J_and_F": 0.55, "S_null": 0.0},
+            "per_video": {
+                "real_video_001": {"vid": "real_video_001", "s_mean_iou": 0.55, "s_fscore": 0.55}
+            }
+        }
+
+        with open(os.path.join(dir1, "results.json"), "w", encoding="utf-8") as f:
+            json.dump(res_real, f)
+        with open(os.path.join(dir2, "results.json"), "w", encoding="utf-8") as f:
+            json.dump(res_mock, f)
+
+        from scripts.compare_runs import load_results
+        # Without allow_mock, must raise ValueError
+        with pytest.raises(ValueError, match="mock/synthetic video ID"):
+            load_results(dir2, allow_mock=False)
+
+        # With allow_mock=True, must load cleanly
+        loaded = load_results(dir2, allow_mock=True)
+        assert "mock_video_001" in loaded["per_video"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
