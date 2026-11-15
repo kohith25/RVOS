@@ -163,10 +163,15 @@ def test_client_unreachable_raises_without_mock():
 
 
 def test_kg_different_videos_produce_distinct_graphs():
-    """FIX 5(d): Two distinct videos must produce different knowledge graphs, not identical templates."""
+    """Two distinct videos must produce different knowledge graphs derived from real media."""
+    fixtures_dir = os.path.join(REPO_ROOT, "tests", "fixtures")
+    from tests.test_kg import StubDetector, StubTagger
+    detector = StubDetector()
+    tagger = StubTagger()
+
     with tempfile.TemporaryDirectory() as tmp_dir:
-        g1 = build_graph("video_dog_barking_123", kg_dir=tmp_dir)
-        g2 = build_graph("video_violin_solo_456", kg_dir=tmp_dir)
+        g1 = build_graph("moving_rect", media_dir=fixtures_dir, kg_dir=tmp_dir, detector=detector, audio_tagger=tagger)
+        g2 = build_graph("static_silent", media_dir=fixtures_dir, kg_dir=tmp_dir, detector=detector, audio_tagger=tagger)
 
         # Node IDs must be unique to each video
         nodes1 = set(g1["nodes"].keys())
@@ -190,14 +195,19 @@ def test_tools_raise_without_mock_when_weights_missing():
 
 def test_kg_audioset_labels_and_classes():
     """Verify that KG audio nodes carry real AudioSet class names."""
+    fixtures_dir = os.path.join(REPO_ROOT, "tests", "fixtures")
+    from tests.test_kg import StubDetector, StubTagger
+    detector = StubDetector()
+    tagger = StubTagger(primary_label="Speech")
+
     with tempfile.TemporaryDirectory() as tmp_dir:
-        g = build_graph("video_guitar_acoustic_789", kg_dir=tmp_dir)
+        g = build_graph("moving_rect", media_dir=fixtures_dir, kg_dir=tmp_dir, detector=detector, audio_tagger=tagger)
         audio_nodes = [n for n in g["nodes"].values() if n["type"] == "audio_event"]
         assert len(audio_nodes) > 0
         for an in audio_nodes:
-            assert "class_name" in an
-            assert isinstance(an["class_name"], str)
-            assert len(an["class_name"]) > 0
+            assert "label" in an
+            assert isinstance(an["label"], str)
+            assert len(an["label"]) > 0
 
 
 def test_use_kg_false_rejection_in_trajectory():

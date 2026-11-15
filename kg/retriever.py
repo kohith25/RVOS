@@ -118,9 +118,16 @@ class KGRetriever:
             rel = edge["relation"]
             if rel == "left_of":
                 facts.append(f"[{src_node.get('label', edge['source'])}] is situated on the left of [{tgt_node.get('label', edge['target'])}].")
-            elif rel == "produces_sound":
+            elif rel == "right_of":
+                facts.append(f"[{src_node.get('label', edge['source'])}] is situated on the right of [{tgt_node.get('label', edge['target'])}].")
+            elif rel == "in_front_of":
+                facts.append(f"[{src_node.get('label', edge['source'])}] is in front of [{tgt_node.get('label', edge['target'])}].")
+            elif rel in ("sounding", "produces_sound"):
                 interval = tgt_node.get("interval", [0, 1])
-                facts.append(f"[{src_node.get('label', edge['source'])}] produces prominent sound during [{interval[0]}-{interval[1]}s].")
+                weight = edge.get("weight", 0.5)
+                facts.append(f"[{src_node.get('label', edge['source'])}] is sounding/correlated with audio during [{interval[0]}-{interval[1]}s] (score {weight:.2f}).")
+            elif rel == "refers_to":
+                facts.append(f"Expression refers to [{tgt_node.get('label', edge['target'])}].")
             elif rel == "audio_aligned":
                 interval = tgt_node.get("interval", [0, 1])
                 facts.append(f"[{src_node.get('label', edge['source'])}] is temporally aligned with audio at [{interval[0]}-{interval[1]}s].")
