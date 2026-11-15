@@ -89,8 +89,8 @@ def get_parser():
     # RL-specific attribution flags (strictly rejected when use_rl=false)
     parser.add_argument("--grounder", type=str, choices=["gdino", "referdino"], default="gdino",
                         help="Grounding model: gdino or referdino (only valid when use_rl=true)")
-    parser.add_argument("--use_kg", type=parse_bool, default=False,
-                        help="Whether to enable multimodal KG retrieval (only valid when use_rl=true)")
+    parser.add_argument("--use_kg", type=parse_bool, default=None,
+                        help="Whether to enable multimodal KG retrieval (defaults to true when use_rl=true, false otherwise)")
     parser.add_argument("--no_rl_ckpt", action="store_true",
                         help="Evaluate agent using SFT weights without RL checkpoint (for attribution)")
     parser.add_argument("--tool_server_url", type=str, default="http://127.0.0.1:8088",
@@ -124,6 +124,9 @@ def parse_args(argv=None):
 
 def validate_args(args):
     # Attribution flags sanity check
+    if args.use_kg is None:
+        args.use_kg = True if args.use_rl else False
+
     if not args.use_rl:
         if args.grounder != "gdino":
             raise ValueError(

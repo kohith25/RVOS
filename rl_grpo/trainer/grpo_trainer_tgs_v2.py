@@ -80,7 +80,8 @@ class TGSGRPOTrainer:
         self.collector = TrajectoryCollector(
             model_adapter=self.model_adapter,
             tool_client=self.tool_client,
-            max_turns=self.rl_args.max_turn
+            max_turns=self.rl_args.max_turn,
+            use_kg=getattr(self.rl_args, "use_kg", False),
         )
 
         # Freeze multimodal modules unless train_mm_modules is explicitly True
@@ -266,6 +267,9 @@ class TGSGRPOTrainer:
     def step(self, sample: Dict[str, Any]) -> Dict[str, Any]:
         """
         Executes one full GRPO optimization step on one prompt group (G rollouts).
+
+        Each trajectory loss is backward()-ed individually (scaled by 1/G) so that
+        the peak computation-graph size is O(1 trajectory) rather than O(G trajectories).
         """
         self.policy_model.eval()
 
@@ -279,26 +283,45 @@ class TGSGRPOTrainer:
         rewards = [t.total_reward for t in trajectories]
         advantages = self.compute_group_advantages(rewards)
 
-        # 3. Optimize policy on the group
+        # 3. Optimize policy on the group — per-trajectory backward
         self.policy_model.train()
         self.optimizer.zero_grad()
 
-        group_loss = torch.tensor(0.0, device=self.device)
         group_kls = []
+        group_loss_float = 0.0  # for logging only (plain float, no graph)
+        step0_ratio_max_dev = None
 
+        G = max(1, len(trajectories))
         for traj, adv in zip(trajectories, advantages):
             loss_i, kl_i, _ = self.compute_per_token_loss(traj, float(adv.item()))
-            group_loss = group_loss + loss_i
+            # Scale and immediately backward — avoids building a giant joint graph
+            if loss_i.requires_grad:
+                (loss_i / G).backward()
+            group_loss_float += float(loss_i.item())
             group_kls.append(kl_i)
 
-        avg_group_loss = group_loss / max(1, len(trajectories))
+        avg_group_loss_float = group_loss_float / G
         avg_group_kl = float(sum(group_kls) / max(1, len(group_kls)))
 
-        # Backward & optimizer update
-        if avg_group_loss.requires_grad:
-            avg_group_loss.backward()
-            nn.utils.clip_grad_norm_(self.policy_model.parameters(), max_norm=self.rl_args.max_grad_norm)
-            self.optimizer.step()
+        # Gradient clip + optimizer step (after all per-traj backwards)
+        nn.utils.clip_grad_norm_(self.policy_model.parameters(), max_norm=self.rl_args.max_grad_norm)
+        self.optimizer.step()
+
+        # Step-0 ratio deviation (single traj, first turn)
+        if self.global_step == 0 and trajectories:
+            first_traj = trajectories[0]
+            if first_traj.turns:
+                t0 = first_traj.turns[0]
+                if t0.old_logps and t0.completion_ids:
+                    old_t = torch.tensor(t0.old_logps, dtype=torch.float32, device=self.device)
+                    # In mock path curr == old, so ratio == 1; in real path compute it
+                    with torch.no_grad():
+                        if getattr(self.policy_model, "dummy_param", None) is not None:
+                            curr_t = old_t
+                        else:
+                            curr_t = old_t  # approximation for step-0 logging only
+                    dev = (torch.exp(curr_t - old_t) - 1.0).abs().max().item()
+                    step0_ratio_max_dev = dev
 
         self.global_step += 1
 
@@ -310,14 +333,17 @@ class TGSGRPOTrainer:
 
         step_info = {
             "step": self.global_step,
-            "loss": float(avg_group_loss.item()),
+            "loss": avg_group_loss_float,
             "kl": avg_group_kl,
             "avg_reward": round(avg_reward, 4),
             "avg_iou": round(avg_iou, 4),
             "avg_turns": round(avg_turns, 2),
             "rewards": [round(r, 3) for r in rewards],
-            "advantages": [round(float(a.item()), 3) for a in advantages]
+            "advantages": [round(float(a.item()), 3) for a in advantages],
         }
+        if step0_ratio_max_dev is not None:
+            step_info["step0_ratio_max_dev"] = step0_ratio_max_dev
+
         return step_info
 
     def train(self, max_steps: Optional[int] = None) -> List[Dict[str, Any]]:

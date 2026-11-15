@@ -17,6 +17,13 @@ ALLOWED_ACTIONS = [
     "stop",
 ]
 
+
+def get_allowed_actions(use_kg: bool = True) -> list:
+    """Return the action list, excluding retrieve_evidence when use_kg is False."""
+    if use_kg:
+        return list(ALLOWED_ACTIONS)
+    return [a for a in ALLOWED_ACTIONS if a != "retrieve_evidence"]
+
 # Action costs (C_tool penalty)
 ACTION_TO_COST = {
     "retrieve_evidence": 0.15,
@@ -46,6 +53,31 @@ SYSTEM_INSTRUCTION = (
     '6. stop: {}\n'
     "Note: Always ground the object with call_referdino and segment with call_sam2 before stopping."
 )
+
+_SYSTEM_INSTRUCTION_NO_KG = (
+    "You are Ref-Thinker, an audio-visual reasoning agent for video referring object segmentation.\n"
+    "You perceive video frames, audio signals, and a natural language referring expression.\n"
+    "At each step, reason about the audio-visual evidence and decide the best next action.\n"
+    "Your output MUST contain a single valid JSON object with the following schema:\n"
+    "{\n"
+    '  "thought": "<brief step-by-step reasoning>",\n'
+    '  "action": "<action_name>",\n'
+    '  "args": { ... }\n'
+    "}\n\n"
+    "Available actions and required arguments:\n"
+    '1. inspect_frames: {"start": <frame_index_0_to_9>, "end": <frame_index_0_to_9>}\n'
+    '2. refine_description: {"text": "<refined object description focusing on visual & audio cues>"}\n'
+    '3. call_referdino: {"text": "<grounding expression for candidate generation>"}\n'
+    '4. call_sam2: {"candidate_id": <int_id_from_referdino_candidates>}\n'
+    '5. stop: {}\n'
+    "Note: Always ground the object with call_referdino and segment with call_sam2 before stopping.\n"
+    "Note: Knowledge Graph retrieval is disabled in this run."
+)
+
+
+def get_system_instruction(use_kg: bool = True) -> str:
+    """Return the system instruction, omitting retrieve_evidence when use_kg is False."""
+    return SYSTEM_INSTRUCTION if use_kg else _SYSTEM_INSTRUCTION_NO_KG
 
 
 def extract_json_from_text(text: str) -> Optional[dict]:
@@ -88,14 +120,20 @@ def extract_json_from_text(text: str) -> Optional[dict]:
     return None
 
 
-def parse_and_validate_action(text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def parse_and_validate_action(text: str, allowed_actions: Optional[list] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     Parses and strictly validates the model's action output.
     Returns:
         (action_dict, error_message)
         If valid: (action_dict, None)
         If invalid: (None, "Reason for validation failure")
+
+    ``allowed_actions`` defaults to the full ALLOWED_ACTIONS list.
+    Pass ``get_allowed_actions(use_kg=False)`` to enforce the KG-disabled set.
     """
+    if allowed_actions is None:
+        allowed_actions = ALLOWED_ACTIONS
+
     data = extract_json_from_text(text)
     if data is None or not isinstance(data, dict):
         return None, "Failed to parse a valid JSON object from model response."
@@ -105,8 +143,8 @@ def parse_and_validate_action(text: str) -> Tuple[Optional[Dict[str, Any]], Opti
         return None, "Missing or invalid 'action' key in JSON."
 
     action = action.strip()
-    if action not in ALLOWED_ACTIONS:
-        return None, f"Action '{action}' is not in allowed actions: {ALLOWED_ACTIONS}."
+    if action not in allowed_actions:
+        return None, f"Action '{action}' is not in allowed actions: {allowed_actions}."
 
     args = data.get("args", {})
     if not isinstance(args, dict):

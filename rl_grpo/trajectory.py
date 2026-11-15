@@ -22,6 +22,8 @@ except ImportError:
 from rl_grpo.constants import (
     ACTION_TO_COST,
     format_observation,
+    get_allowed_actions,
+    get_system_instruction,
 )
 from rl_grpo.model_adapter import TGSModelAdapter, ModelAction
 from rl_grpo.rewards import compute_episodic_reward, compute_mask_iou

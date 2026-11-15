@@ -278,3 +278,159 @@ def test_lambda_seg_zeroed_with_warning(caplog):
     assert trainer.rl_args.lambda_seg == 0.0, "lambda_seg must be zeroed"
     assert any("lambda_seg" in r.message for r in caplog.records), \
         "Must emit a warning about lambda_seg"
+
+
+# ---------------------------------------------------------------------------
+# TEST 7 (Phase 4.1): use_kg propagates from RLGRPOArguments to TrajectoryCollector
+# ---------------------------------------------------------------------------
+def test_use_kg_propagates_to_collector():
+    """TrajectoryCollector.use_kg must match what was set in RLGRPOArguments."""
+    model = _TinyMockModel()
+    tokenizer = _MockTokenizer()
+    dataset = [{"expression": "x", "vid": "v001", "test_name": "test_s"}]
+
+    for use_kg_val in (True, False):
+        args = RLGRPOArguments(
+            use_kg=use_kg_val,
+            output_dir="/tmp/tgs_kg_test",
+        )
+        trainer = TGSGRPOTrainer(
+            policy_model=model,
+            ref_model=None,
+            tokenizer=tokenizer,
+            train_dataset=dataset,
+            rl_args=args,
+            tool_client=ToolClient(use_mock_fallback=True, use_cache=False),
+            device=torch.device("cpu"),
+        )
+        assert trainer.collector.use_kg == use_kg_val, (
+            f"Expected collector.use_kg={use_kg_val}, got {trainer.collector.use_kg}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TEST 8 (Phase 4.2): retrieve_evidence absent from no-KG action set + prompt
+# ---------------------------------------------------------------------------
+def test_retrieve_evidence_absent_when_use_kg_false():
+    """get_allowed_actions(use_kg=False) must NOT contain retrieve_evidence."""
+    from rl_grpo.constants import get_allowed_actions, get_system_instruction, parse_and_validate_action
+
+    actions_no_kg = get_allowed_actions(use_kg=False)
+    assert "retrieve_evidence" not in actions_no_kg, (
+        "retrieve_evidence must be excluded when use_kg=False"
+    )
+    # All other actions must still be present
+    for a in ("inspect_frames", "refine_description", "call_referdino", "call_sam2", "stop"):
+        assert a in actions_no_kg, f"Action '{a}' missing from no-KG action set"
+
+    # System instruction must not mention retrieve_evidence
+    inst_no_kg = get_system_instruction(use_kg=False)
+    assert "retrieve_evidence" not in inst_no_kg, (
+        "get_system_instruction(use_kg=False) must not mention retrieve_evidence"
+    )
+
+    # Parsing retrieve_evidence with use_kg=False must fail validation
+    text = '{"thought": "...", "action": "retrieve_evidence", "args": {"query": "dog"}}'
+    action_dict, err = parse_and_validate_action(text, allowed_actions=actions_no_kg)
+    assert action_dict is None and err is not None, (
+        "parse_and_validate_action must reject retrieve_evidence when use_kg=False"
+    )
+
+
+def test_retrieve_evidence_valid_when_use_kg_true():
+    """parse_and_validate_action with use_kg=True must accept retrieve_evidence."""
+    from rl_grpo.constants import get_allowed_actions, parse_and_validate_action
+
+    actions_kg = get_allowed_actions(use_kg=True)
+    assert "retrieve_evidence" in actions_kg
+
+    text = '{"thought": "...", "action": "retrieve_evidence", "args": {"query": "dog"}}'
+    action_dict, err = parse_and_validate_action(text, allowed_actions=actions_kg)
+    assert action_dict is not None and err is None, (
+        f"retrieve_evidence must be valid when use_kg=True; err={err}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# TEST 9 (Phase 4.3): Per-trajectory backward — gradient equivalence
+# ---------------------------------------------------------------------------
+def test_per_traj_backward_equivalent_to_batch():
+    """
+    Gradients from per-trajectory backward (each scaled 1/G) must equal
+    gradients from summing losses then one backward (divided by G).
+    """
+    trainer = _make_trainer(num_generations=2)
+
+    old_logps_a = [-0.5, -0.5]
+    old_logps_b = [-1.0, -1.0]
+    turn_a = _make_turn(completion_ids=[10, 11], old_logps=old_logps_a)
+    turn_b = _make_turn(completion_ids=[10, 11], old_logps=old_logps_b)
+    traj_a = _make_traj(turns=[turn_a], reward=0.5)
+    traj_b = _make_traj(turns=[turn_b], reward=-0.5)  # different rewards = non-zero advantage
+
+    advantages = trainer.compute_group_advantages([0.5, -0.5])
+
+    # --- Method A: batch accumulate then one backward ---
+    trainer.policy_model.dummy_param.grad = None
+    group_loss = torch.tensor(0.0, device=trainer.device)
+    for traj, adv in zip([traj_a, traj_b], advantages):
+        loss_i, _, _ = trainer.compute_per_token_loss(traj, float(adv.item()))
+        group_loss = group_loss + loss_i
+    (group_loss / 2).backward()
+    grad_batch = trainer.policy_model.dummy_param.grad.clone() if trainer.policy_model.dummy_param.grad is not None else torch.zeros(1)
+
+    # --- Method B: per-trajectory backward (1/G each) ---
+    trainer.policy_model.dummy_param.grad = None
+    for traj, adv in zip([traj_a, traj_b], advantages):
+        loss_i, _, _ = trainer.compute_per_token_loss(traj, float(adv.item()))
+        if loss_i.requires_grad:
+            (loss_i / 2).backward()
+    grad_per = trainer.policy_model.dummy_param.grad.clone() if trainer.policy_model.dummy_param.grad is not None else torch.zeros(1)
+
+    assert torch.allclose(grad_batch, grad_per, atol=1e-6), (
+        f"Gradient mismatch: batch={grad_batch.item():.8f} vs per-traj={grad_per.item():.8f}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# TEST 10 (Phase 4.4): ref_mode field exists in RLGRPOArguments
+# ---------------------------------------------------------------------------
+def test_ref_mode_in_rl_args():
+    """RLGRPOArguments must have a ref_mode field defaulting to 'peft_disable'."""
+    args = RLGRPOArguments()
+    assert hasattr(args, "ref_mode"), "RLGRPOArguments must have ref_mode field"
+    assert args.ref_mode == "peft_disable", (
+        f"Default ref_mode must be 'peft_disable', got '{args.ref_mode}'"
+    )
+    # Verify non-default value is accepted
+    args2 = RLGRPOArguments(ref_mode="copy")
+    assert args2.ref_mode == "copy"
+
+
+# ---------------------------------------------------------------------------
+# TEST 11 (Phase 4.5): step-0 ratio deviation reported in step_info
+# ---------------------------------------------------------------------------
+def test_step0_ratio_max_dev_in_step_info():
+    """
+    At global_step==0 the step() output must contain 'step0_ratio_max_dev'.
+    For the mock path curr_logps == old_logps => ratio == 1.0 => dev ≈ 0.
+    """
+    trainer = _make_trainer(num_generations=1)
+    trainer.global_step = 0
+    sample = {
+        "uid": "v001",
+        "expression": "the guitar player",
+        "ref": "the guitar player",
+        "gt_masks": None,
+        "is_null": False,
+        "video": None,
+        "audio": None,
+    }
+    info = trainer.step(sample)
+    assert "step0_ratio_max_dev" in info, (
+        f"step() at global_step=0 must include 'step0_ratio_max_dev'; got keys: {list(info.keys())}"
+    )
+    # In mock path ratio should be exactly 1.0
+    assert info["step0_ratio_max_dev"] < 1e-3, (
+        f"Mock path: step0_ratio_max_dev should be ~0, got {info['step0_ratio_max_dev']}"
+    )

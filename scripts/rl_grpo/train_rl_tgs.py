@@ -13,7 +13,9 @@ Fixes P1:
 
 import os
 import sys
+import json
 import argparse
+import datetime
 try:
     import torch
     HAS_TORCH = True
@@ -49,7 +51,7 @@ def get_parser():
     parser.add_argument("--beta", type=float, default=0.04, help="KL penalty beta")
     parser.add_argument("--device", type=str, default=None, help="Device (cuda or cpu)")
     parser.add_argument("--grounder", type=str, default="gdino", help="Grounder tool")
-    parser.add_argument("--use_kg", type=str, default="false", help="Whether to use KG")
+    parser.add_argument("--use_kg", type=str, default="true", help="Whether to use KG")
     parser.add_argument("--skip_format_gate", action="store_true", help="Skip format validity gate check")
     parser.add_argument("--max_new_tokens", type=int, default=160, help="Max new tokens per action turn")
     parser.add_argument("--train_mm_modules", type=str, default="false", help="Whether to train multimodal modules")
@@ -86,9 +88,14 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
 
+    # Normalise bool flags
+    use_kg = args.use_kg.lower() in ("true", "1", "yes")
+    train_mm = args.train_mm_modules.lower() in ("true", "1", "yes")
+
     print("=" * 65)
     print("  Starting TGS-Agent Multi-Turn RL Training (GRPO)")
     print(f"  Device: {device} | Group Size (G): {args.num_generations} | Max Steps: {args.max_steps}")
+    print(f"  use_kg: {use_kg} | grounder: {args.grounder}")
     print("=" * 65)
 
     # 1. Build Policy Model, Reference Model, and Tokenizer
@@ -102,6 +109,18 @@ def main():
         device=str(device),
         use_mock=is_mock
     )
+
+    # Write rl_meta.json so infer_pipeline can detect kg/grounder mismatch
+    import json
+    import datetime
+    rl_meta = {
+        "use_kg": use_kg,
+        "grounder": args.grounder,
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+    }
+    with open(os.path.join(args.out_dir, "rl_meta.json"), "w") as fh:
+        json.dump(rl_meta, fh, indent=2)
+    print(f"[Info] rl_meta.json written to {args.out_dir}")
 
     # 2. Build Dataset
     meta_csv_path = "./R2AVSBench/RefAVSBench_metadata.csv"
@@ -130,17 +149,19 @@ def main():
                 "Pass --skip_format_gate to bypass."
             )
 
-    # 4. Setup GRPO Arguments
+    # 4. Setup GRPO Arguments — propagate use_kg, ref_mode, train_mm_modules
     rl_args = RLGRPOArguments(
         max_steps=args.max_steps,
         num_generations=args.num_generations,
         learning_rate=args.learning_rate,
         beta=args.beta,
         output_dir=args.out_dir,
-        seed=args.seed
+        seed=args.seed,
+        use_kg=use_kg,
+        train_mm_modules=train_mm,
     )
 
-    # 4. Initialize Trainer and Train
+    # 5. Initialize Trainer and Train — pass use_kg to collector via trainer
     tool_client = get_tool_client(use_mock_fallback=is_mock)
     trainer = TGSGRPOTrainer(
         policy_model=policy_model,

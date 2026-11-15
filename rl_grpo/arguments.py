@@ -45,3 +45,11 @@ class RLGRPOArguments:
 
     # Multimodal freezing
     train_mm_modules: bool = field(default=False)
+
+    # Reference model mode:
+    #   "peft_disable" = use adapter-disable context manager (no extra GPU memory).
+    #   "copy" = frozen separate copy of the full model (doubles memory).
+    ref_mode: str = field(default="peft_disable")
+
+    # Whether the KG retrieve_evidence action is enabled
+    use_kg: bool = field(default=True)

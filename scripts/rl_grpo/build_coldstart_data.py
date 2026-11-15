@@ -118,6 +118,66 @@ def extract_objects_from_cot(cot_text: str) -> Tuple[Optional[str], Optional[str
     return f_obj, s_obj
 
 
+def build_expert_trajectory(expression: str, uid: str = "sample_0") -> List[Dict[str, Any]]:
+    """Generates 4 scripted expert turns with build_turn_prompt and formatted completion JSON."""
+    history = []
+    turns = []
+    steps = [
+        {
+            "thought": f"Query the multimodal knowledge graph to gather relational and acoustic context for '{expression}'.",
+            "action": "retrieve_evidence",
+            "args": {"query": expression},
+            "obs_data": {"facts": [f"Visual entity '{expression}' localized in video frames", "Acoustic event active across sequence"]}
+        },
+        {
+            "thought": f"Ground candidate object tubelets matching '{expression}' using ReferDINO.",
+            "action": "call_referdino",
+            "args": {"text": expression},
+            "obs_data": {"candidates": [{"cand_id": 0, "side": "center", "score": 0.88, "mean_area": 0.14}]}
+        },
+        {
+            "thought": "Refine grounded candidate 0 bounding boxes into pixel-accurate binary masks using SAM2.",
+            "action": "call_sam2",
+            "args": {"candidate_id": 0},
+            "obs_data": {"candidate_id": 0, "num_frames": 10, "mean_mask_area": 0.14}
+        },
+        {
+            "thought": "Candidate segmented accurately across all 10 video frames; terminate reasoning episode.",
+            "action": "stop",
+            "args": {},
+            "obs_data": {}
+        }
+    ]
+    for step in steps:
+        words = step["thought"].split()
+        assert len(words) <= 60
+        prompt = TGSModelAdapter.build_turn_prompt(expression, history)
+        completion_dict = {
+            "thought": step["thought"],
+            "action": step["action"],
+            "args": step["args"]
+        }
+        completion_text = json.dumps(completion_dict)
+        obs_text = format_observation(step["action"], step["obs_data"])
+        turns.append({
+            "uid": uid,
+            "expression": expression,
+            "prompt_text": prompt,
+            "completion_text": completion_text,
+            "action": step["action"],
+            "args": step["args"],
+            "thought": step["thought"],
+            "observation": obs_text
+        })
+        history.append({
+            "thought": step["thought"],
+            "action": step["action"],
+            "args": step["args"],
+            "observation": obs_text
+        })
+    return turns
+
+
 def get_parser():
     parser = argparse.ArgumentParser(description="Build Cold-Start SFT Data for Ref-Thinker Action Format")
     parser.add_argument("--out_path", type=str, default="data/coldstart_trajectories.jsonl")

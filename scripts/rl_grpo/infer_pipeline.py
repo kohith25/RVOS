@@ -32,11 +32,18 @@ from rl_grpo.model_adapter import TGSModelAdapter
 from rl_grpo.trajectory import TrajectoryCollector, Trajectory
 from tools.client import ToolClient, get_tool_client
 
-# Import avss_utils with NO fallback (let ImportError propagate if environment lacks dependencies)
-grounded_sam2_path = os.path.join(REPO_ROOT, "ground_segment_scripts", "Grounded-SAM-2")
-if grounded_sam2_path not in sys.path:
-    sys.path.insert(0, grounded_sam2_path)
-from utils.avss_utils import mask_iou, Eval_Fmeasure, metric_s_for_null_batch
+# Import avss_utils with guarded import for CPU test collection
+try:
+    grounded_sam2_path = os.path.join(REPO_ROOT, "ground_segment_scripts", "Grounded-SAM-2")
+    if grounded_sam2_path not in sys.path:
+        sys.path.insert(0, grounded_sam2_path)
+    from utils.avss_utils import mask_iou, Eval_Fmeasure, metric_s_for_null_batch
+    HAS_AVSS_UTILS = True
+except (ImportError, ModuleNotFoundError):
+    mask_iou = None
+    Eval_Fmeasure = None
+    metric_s_for_null_batch = None
+    HAS_AVSS_UTILS = False
 
 
 def parse_args():
@@ -51,8 +58,10 @@ def parse_args():
     parser.add_argument("--gt_mask_dir", type=str, default="./REFAVS/gt_mask")
     parser.add_argument("--meta_csv_path", type=str, default=None)
     parser.add_argument("--grounder", type=str, choices=["gdino", "referdino"], default="gdino")
-    parser.add_argument("--use_kg", type=str, default="false")
+    parser.add_argument("--use_kg", type=str, default="true")
     parser.add_argument("--no_rl_ckpt", action="store_true", help="Evaluate agent using SFT weights without RL checkpoint")
+    parser.add_argument("--allow_kg_mismatch", action="store_true",
+                        help="Skip the rl_meta.json use_kg consistency check")
     parser.add_argument("--tool_server_url", type=str, default="http://127.0.0.1:8088")
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--save_pred_mask", action="store_true")
@@ -93,6 +102,23 @@ def main():
     print(f"  Benchmark: {args.benchmark} | Split: {args.test_name} | Grounder: {args.grounder} | Use KG: {use_kg}")
     print(f"  Mock Mode: {args.mock} | No RL Ckpt (SFT only): {args.no_rl_ckpt}")
     print("=" * 65)
+
+    # 0. KG mismatch check: compare --use_kg flag against rl_meta.json from training
+    if not args.no_rl_ckpt and not args.mock:
+        rl_meta_path = os.path.join(args.ckpt_dir, "rl_meta.json")
+        if os.path.exists(rl_meta_path):
+            with open(rl_meta_path) as fh:
+                rl_meta = json.load(fh)
+            trained_use_kg = bool(rl_meta.get("use_kg", False))
+            if trained_use_kg != use_kg and not args.allow_kg_mismatch:
+                raise ValueError(
+                    f"KG mismatch: checkpoint was trained with use_kg={trained_use_kg} "
+                    f"but inference is running with --use_kg {args.use_kg}. "
+                    "Pass --allow_kg_mismatch to override."
+                )
+            if trained_use_kg != use_kg:
+                print(f"[Warning] KG mismatch ignored via --allow_kg_mismatch: "
+                      f"trained={trained_use_kg}, infer={use_kg}")
 
     # 1. Build Model
     if args.mock:
@@ -308,12 +334,16 @@ def main():
         "avg_latency_sec": round(float(np.mean(latencies)), 2) if latencies else 0.0,
     }
 
+    tool_info = tool_client.get_info()
+    grounder_cls = tool_info.get("grounder_class", args.grounder)
+
     results_data = {
         "pipeline": "rl_grpo",
         "use_rl": True,
         "benchmark": args.benchmark,
         "test_name": args.test_name,
         "grounder": args.grounder,
+        "grounder_class": grounder_cls,
         "use_kg": use_kg,
         "no_rl_ckpt": args.no_rl_ckpt,
         "metrics": final_metrics,
