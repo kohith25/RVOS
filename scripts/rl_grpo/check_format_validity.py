@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 scripts/rl_grpo/check_format_validity.py - Format Validity Gate for RL Training
@@ -50,7 +51,7 @@ def evaluate_format_validity(model_adapter: TGSModelAdapter, samples: List[Dict[
     return validity_rate
 
 
-def main():
+def get_parser():
     parser = argparse.ArgumentParser(description="Evaluate Ref-Thinker Action Format Validity Gate")
     parser.add_argument("--ckpt_dir", type=str, default=None)
     parser.add_argument("--avs_ckpt_dir", type=str, default=None)
@@ -59,7 +60,15 @@ def main():
     parser.add_argument("--num_eval_samples", type=int, default=20)
     parser.add_argument("--mock", action="store_true", help="Run with mock model on CPU")
     parser.add_argument("--max_new_tokens", type=int, default=160)
-    args = parser.parse_args()
+    return parser
+
+
+def parse_args(args=None):
+    return get_parser().parse_args(args)
+
+
+def main():
+    args = parse_args()
 
     print("\n" + "=" * 65)
     print("  Ref-Thinker Format Validity Gate Check")

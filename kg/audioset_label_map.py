@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 kg/audioset_label_map.py - AudioSet Label Map for BEATs Acoustic Entity Extraction

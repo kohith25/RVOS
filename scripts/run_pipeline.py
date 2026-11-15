@@ -35,7 +35,7 @@ def parse_bool(value):
     raise argparse.ArgumentTypeError(f"Boolean value expected, got {value!r}")
 
 
-def parse_args():
+def get_parser():
     parser = argparse.ArgumentParser(description="Unified Entry Point for TGS-Agent (Original & RL GRPO)")
 
     # Core mode flag
@@ -98,7 +98,12 @@ def parse_args():
     parser.add_argument("--mock", action="store_true",
                         help="Explicit flag to run with mock models/tools for testing on CPU")
 
-    args = parser.parse_args()
+    return parser
+
+
+def parse_args(argv=None):
+    parser = get_parser()
+    args = parser.parse_args(argv)
 
     # Resolve all user-supplied paths against launch cwd
     if args.out_dir is not None:

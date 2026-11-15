@@ -1,11 +1,18 @@
+from __future__ import annotations
 """
 sam_loss.py  –  Segmentation losses for TGS-Agent RL integration.
 Copied from VideoSEG-O3/projects/open_r1/trainer/sam_loss.py and kept
 identical so that the two codebases stay in sync.
 """
 
-import torch
-import torch.nn.functional as F
+try:
+    import torch
+    import torch.nn.functional as F
+    HAS_TORCH = True
+except ImportError:
+    torch = None
+    F = None
+    HAS_TORCH = False
 
 
 def dice_loss(inputs, targets, num_objects, loss_on_multimask=False):

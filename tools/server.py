@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 tools/server.py - Standalone HTTP Tool Server for `dino` Environment
@@ -13,11 +14,16 @@ Endpoints:
   POST /kg
 """
 
+import os
 import sys
 import json
 import argparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional, List, Dict, Any, Tuple
+
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from tools.referdino_tool import ReferDINOTool, GroundingDINOTool
 from tools.sam2_tool import SAM2Tool
@@ -120,7 +126,7 @@ def run_server(port=8088, host="0.0.0.0", media_dir="./REFAVS/media", kg_dir="kg
         server.server_close()
 
 
-def main():
+def get_parser():
     parser = argparse.ArgumentParser(description="TGS-Agent HTTP Tool Server")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host interface")
     parser.add_argument("--port", type=int, default=8088, help="Port to listen on")
@@ -128,8 +134,15 @@ def main():
     parser.add_argument("--media_dir", type=str, default="./REFAVS/media", help="Media directory")
     parser.add_argument("--kg_dir", type=str, default="kg_cache", help="KG cache directory")
     parser.add_argument("--mock", action="store_true", help="Run with mock tools for CPU testing")
-    args = parser.parse_args()
+    return parser
 
+
+def parse_args(args=None):
+    return get_parser().parse_args(args)
+
+
+def main():
+    args = parse_args()
     run_server(port=args.port, host=args.host, media_dir=args.media_dir, kg_dir=args.kg_dir, grounder=args.grounder, use_mock=args.mock)
 
 

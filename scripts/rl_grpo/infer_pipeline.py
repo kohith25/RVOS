@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 scripts/rl_grpo/infer_pipeline.py - Multi-turn RL Inference & Evaluation Pipeline

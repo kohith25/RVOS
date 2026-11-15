@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 scripts/rl_grpo/train_rl_tgs.py - Entry-Point for GRPO Training on Ref-Thinker
@@ -13,7 +14,12 @@ Fixes P1:
 import os
 import sys
 import argparse
-import torch
+try:
+    import torch
+    HAS_TORCH = True
+except ImportError:
+    torch = None
+    HAS_TORCH = False
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
@@ -29,7 +35,7 @@ from tools.client import get_tool_client
 from scripts.rl_grpo.check_format_validity import evaluate_format_validity
 
 
-def parse_args():
+def get_parser():
     parser = argparse.ArgumentParser(description="TGS-Agent GRPO Training Entry Point")
     parser.add_argument("--ckpt_dir", type=str, default="./results_real/epochs6_lr1e-4_bs4_gradacc8_lora_r8alpha16dropout0.05/checkpoint-551",
                         help="Path to SFT checkpoint")
@@ -48,7 +54,11 @@ def parse_args():
     parser.add_argument("--max_new_tokens", type=int, default=160, help="Max new tokens per action turn")
     parser.add_argument("--train_mm_modules", type=str, default="false", help="Whether to train multimodal modules")
     parser.add_argument("--use_mock", action="store_true", help="Run with mock models on CPU for testing")
-    return parser.parse_args()
+    return parser
+
+
+def parse_args(args=None):
+    return get_parser().parse_args(args)
 
 
 class MockDataset:

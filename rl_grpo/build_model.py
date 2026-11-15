@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 rl_grpo/build_model.py - Model Builder for Ref-Thinker Policy and Reference Models

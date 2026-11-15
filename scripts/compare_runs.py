@@ -24,7 +24,7 @@ def _is_mock_video(uid: str) -> bool:
     return any(uid.startswith(p) for p in _MOCK_VIDEO_PREFIXES)
 
 
-def parse_args():
+def get_parser():
     parser = argparse.ArgumentParser(description="Compare two TGS-Agent pipeline evaluation runs")
     parser.add_argument("--run1", type=str, required=True, help="Directory of run 1 (typically use_rl=false)")
     parser.add_argument("--run2", type=str, required=True, help="Directory of run 2 (typically use_rl=true)")
@@ -35,7 +35,11 @@ def parse_args():
         "--allow_mock", action="store_true", default=False,
         help="Allow mock/synthetic video IDs in results. Without this flag, any mock video ID causes an error."
     )
-    return parser.parse_args()
+    return parser
+
+
+def parse_args(args=None):
+    return get_parser().parse_args(args)
 
 
 def load_results(dir_path, allow_mock=False):

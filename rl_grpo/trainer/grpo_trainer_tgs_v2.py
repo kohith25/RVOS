@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 rl_grpo/trainer/grpo_trainer_tgs_v2.py - Corrected GRPO Trainer for TGS-Agent
@@ -17,10 +18,18 @@ import os
 import time
 import logging
 from typing import Any, Dict, List, Optional, Tuple
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.optim import AdamW
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    from torch.optim import AdamW
+    HAS_TORCH = True
+except ImportError:
+    torch = None
+    nn = object
+    F = None
+    AdamW = None
+    HAS_TORCH = False
 
 from rl_grpo.arguments import RLGRPOArguments
 from rl_grpo.model_adapter import TGSModelAdapter

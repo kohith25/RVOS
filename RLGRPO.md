@@ -56,8 +56,8 @@ scripts/run_pipeline.py          # Unified dispatcher (--use_rl false|true)
 
 ```bash
 conda activate dino
-python tools/server.py --port 8088 --grounder referdino
-# To use GroundingDINO instead: --grounder grounding_dino
+python tools/server.py --port 8088 --grounder gdino
+# To use ReferDINO instead: python tools/server.py --port 8088 --grounder referdino
 ```
 
 ---
@@ -72,12 +72,12 @@ conda activate think
 # Build 4-turn scripted trajectories from the train split
 python scripts/rl_grpo/build_coldstart_data.py \
     --meta_csv_path data/ref_avs_meta.csv \
-    --out_jsonl work_dirs_coldstart/coldstart_data.jsonl
+    --out_path work_dirs_coldstart/coldstart_data.jsonl
 
 # SFT on action format (saves finetune_weights.bin)
 python scripts/rl_grpo/sft_action_format.py \
     --model_name_or_path /path/to/base_llm \
-    --ckpt_dir /path/to/tgs_sft_checkpoint \
+    --avs_ckpt_dir /path/to/tgs_sft_checkpoint \
     --data_path work_dirs_coldstart/coldstart_data.jsonl \
     --output_dir work_dirs_coldstart/sft_action
 ```
@@ -88,8 +88,7 @@ python scripts/rl_grpo/sft_action_format.py \
 
 ```bash
 python scripts/rl_grpo/check_format_validity.py \
-    --model_path work_dirs_coldstart/sft_action \
-    --data_path work_dirs_coldstart/coldstart_data.jsonl \
+    --ckpt_dir work_dirs_coldstart/sft_action \
     --threshold 0.95
 ```
 
@@ -102,10 +101,7 @@ conda activate think
 python scripts/rl_grpo/train_rl_tgs.py \
     --model_name_or_path /path/to/base_llm \
     --ckpt_dir work_dirs_coldstart/sft_action \
-    --avs_ckpt_dir /path/to/tgs_sft_checkpoint \
-    --output_dir work_dirs_RL/tgs_grpo \
-    --meta_csv_path data/ref_avs_meta.csv \
-    --tool_server_url http://127.0.0.1:8088 \
+    --out_dir work_dirs_RL/tgs_grpo \
     --num_generations 4 \
     --max_steps 1000 \
     --learning_rate 5e-6 \

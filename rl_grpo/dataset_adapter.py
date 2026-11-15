@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 rl_grpo/dataset_adapter.py - Dataset Adapter with True Ground Truth Masks

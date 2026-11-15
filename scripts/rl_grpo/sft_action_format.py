@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 scripts/rl_grpo/sft_action_format.py - LoRA SFT for Ref-Thinker Action Format Conditioning
@@ -21,7 +22,7 @@ if REPO_ROOT not in sys.path:
 from rl_grpo.build_model import build_tgs_model
 
 
-def parse_args():
+def get_parser():
     parser = argparse.ArgumentParser(description="Action Format LoRA SFT for Ref-Thinker")
     parser.add_argument("--data_path", type=str, default="data/coldstart_trajectories.jsonl")
     parser.add_argument("--output_dir", type=str, default="./work_dirs_RL/sft_format")
@@ -32,7 +33,11 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--mock", action="store_true", help="Run with mock model on CPU")
-    return parser.parse_args()
+    return parser
+
+
+def parse_args(args=None):
+    return get_parser().parse_args(args)
 
 
 def main():

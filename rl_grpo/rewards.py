@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 rl_grpo/rewards.py - Episodic Composite Reward System for Ref-Thinker

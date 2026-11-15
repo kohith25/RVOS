@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 scripts/rl_grpo/build_coldstart_data.py - Cold-Start Trajectory Generator for Action SFT
@@ -94,13 +95,21 @@ def build_expert_trajectory(expression: str, uid: str = "sample_0") -> List[Dict
     return turns
 
 
-def main():
+def get_parser():
     parser = argparse.ArgumentParser(description="Build Cold-Start SFT Data for Ref-Thinker Action Format")
     parser.add_argument("--out_path", type=str, default="data/coldstart_trajectories.jsonl")
     parser.add_argument("--meta_csv_path", type=str, default=None)
     parser.add_argument("--num_samples", type=int, default=100)
     parser.add_argument("--mock", action="store_true", help="Generate synthetic coldstart dataset")
-    args = parser.parse_args()
+    return parser
+
+
+def parse_args(args=None):
+    return get_parser().parse_args(args)
+
+
+def main():
+    args = parse_args()
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out_path)), exist_ok=True)
 

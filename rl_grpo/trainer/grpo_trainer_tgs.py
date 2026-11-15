@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 from dataclasses import asdict
 from typing import Dict, List, Optional

@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 rl_grpo/model_adapter.py - Multimodal Policy Adapter for Ref-Thinker

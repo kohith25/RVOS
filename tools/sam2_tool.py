@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """
 tools/sam2_tool.py - SAM2 Video Object Segmentation Tool
