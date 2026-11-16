@@ -32,21 +32,12 @@ class StubDetector:
         self.label = label
         self.boxes = boxes
 
-    def extract_tracklets(self, frame_paths: List[str], text_prompt: str) -> List[Dict[str, Any]]:
+    def detect_frame(self, frame_path: str, text_prompt: str) -> List[Dict[str, Any]]:
         if self.boxes is not None:
-            track_boxes = self.boxes
+            box = self.boxes[0]
         else:
-            # Default box for 64x64 moving rect (x ~ 10-40, y ~ 20-44)
-            track_boxes = [[0.1, 0.3, 0.6, 0.7] for _ in range(len(frame_paths))]
-
-        return [{
-            "cand_id": 0,
-            "label": self.label,
-            "boxes": track_boxes,
-            "mean_score": 0.95,
-            "mean_area": 0.20,
-            "spatial_location": "center",
-        }]
+            box = [0.1, 0.3, 0.6, 0.7]
+        return [{"box": box, "label": self.label, "score": 0.95}]
 
 
 class StubTagger:
@@ -213,6 +204,29 @@ def test_retriever_query_conditioned(fixtures_dir, tmp_kg_dir):
     assert "facts" in res and "node_ids" in res
     assert len(res["facts"]) > 0
     assert any("guitar" in f.lower() or "acoustic" in f.lower() for f in res["facts"])
+
+
+def test_kg_retriever():
+    """Use fixture media when exercising the KG retriever without cached graphs."""
+    fixtures_dir = os.path.join(REPO_ROOT, "tests", "fixtures")
+    detector = StubDetector(label="guitar")
+    tagger = StubTagger(primary_label="Acoustic_guitar")
+    with tempfile.TemporaryDirectory() as kg_dir:
+        retriever = KGRetriever(kg_dir=kg_dir, media_dir=fixtures_dir)
+        graph = build_graph(
+            "moving_rect",
+            media_dir=fixtures_dir,
+            kg_dir=kg_dir,
+            reference_expression="the guitar playing on the left",
+            detector=detector,
+            audio_tagger=tagger,
+        )
+        result = retriever.retrieve(
+            "moving_rect", query="guitar sound"
+        )
+    assert graph["num_nodes"] > 0
+    assert result["facts"]
+    assert result["node_ids"]
 
 
 def test_no_hash_derivation_in_kg_source():

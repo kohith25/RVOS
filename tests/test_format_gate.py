@@ -21,14 +21,15 @@ from rl_grpo.model_adapter import TGSModelAdapter, ModelAction
 def test_build_coldstart_trajectory():
     """Verify scripted expert trajectory generation."""
     expr = "a man playing the acoustic guitar"
-    turns = build_expert_trajectory(expr, uid="sample_test")
+    turns = build_expert_trajectory(expr, uid="sample_test", mock=True)
 
-    # Must produce 4 sequential turns
-    assert len(turns) == 4
-    expected_actions = ["retrieve_evidence", "call_referdino", "call_sam2", "stop"]
+    # Must produce 5 sequential mock turns, including the shared inspect_frames path.
+    assert len(turns) == 5
+    expected_actions = ["retrieve_evidence", "inspect_frames", "call_referdino", "call_sam2", "stop"]
     for i, expected_act in enumerate(expected_actions):
         t = turns[i]
         assert t["action"] == expected_act
+        assert t["mock"] is True
         # Thought word count constraint: <= 60 words
         word_count = len(t["thought"].split())
         assert word_count <= 60, f"Turn {i} thought has {word_count} words (> 60)"

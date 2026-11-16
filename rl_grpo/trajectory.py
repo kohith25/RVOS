@@ -138,26 +138,13 @@ class TrajectoryCollector:
             elif action == "inspect_frames":
                 start = args.get("start", 0)
                 end = args.get("end", 9)
-                if self.use_kg:
-                    kg_info = self.tool_client.kg_retrieve(uid, query="", k_hops=1)
-                    audio_nodes = [n for n in kg_info.get("nodes", {}).values() if n.get("type") == "audio_event"]
-                    range_loudness = [n.get("loudness", 0.0) for n in audio_nodes if start <= n.get("interval", [0])[0] <= end]
-                    avg_loudness = round(sum(range_loudness) / len(range_loudness), 3) if range_loudness else 0.35
-                else:
-                    if audio_tensor is not None and hasattr(audio_tensor, "abs"):
-                        avg_loudness = round(float(audio_tensor.abs().mean().item()) * 10, 3)
-                    else:
-                        avg_loudness = 0.35
-
                 visible_cands = [c.get("cand_id") for c in current_candidates]
-                res = {
-                    "start": start,
-                    "end": end,
-                    "num_frames": end - start + 1,
-                    "avg_audio_loudness": avg_loudness,
-                    "visible_candidate_ids": visible_cands,
-                    "resolution": [224, 224]
-                }
+                res = self.tool_client.inspect_frames(
+                    uid,
+                    start,
+                    end,
+                    visible_candidate_ids=visible_cands,
+                )
                 observation_text = format_observation("inspect_frames", res)
 
             elif action == "refine_description":

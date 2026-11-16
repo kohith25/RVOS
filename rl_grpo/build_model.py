@@ -204,7 +204,7 @@ def build_tgs_model(
     lora_dropout: float = 0.05,
     lora_bias: str = "none",
     freeze_backbone: bool = True,
-    ref_mode: str = "copy",
+    ref_mode: str = "peft_disable",
     bf16: bool = True,
     fp16: bool = False,
     visual_branch: bool = True,

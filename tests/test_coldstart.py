@@ -122,25 +122,66 @@ def test_no_torch_zeros_outside_mock_branch():
 
 def test_candidate_selection_varies_with_gt():
     """
-    Verify that candidate_id selection chooses the candidate with maximum IoU
-    against GT, and is not hardcoded to 0.
+    Candidate selection must use SAM2 mask IoU against GT, not box overlap.
     """
-    from scripts.rl_grpo.build_coldstart_data import compute_box_mask_iou
+    from scripts.rl_grpo.build_coldstart_data import select_candidate_by_mask_iou
     import numpy as np
 
-    # Create GT mask located on the right side
-    gt = np.zeros((10, 224, 224), dtype=bool)
-    gt[:, 120:200, 140:210] = True
+    gt = np.zeros((10, 16, 16), dtype=np.uint8)
+    gt[:, 8:14, 9:15] = 1
+    left = np.zeros_like(gt)
+    left[:, 1:6, 1:6] = 1
 
-    cand0_boxes = [[0.05, 0.05, 0.3, 0.3]] * 10  # Left
-    cand1_boxes = [[0.60, 0.50, 0.95, 0.90]] * 10 # Right (matches GT)
+    class MaskTool:
+        def sam2_segment(self, uid, boxes):
+            mask = right if boxes[0][0] > 0.5 else left
+            return mask, np.zeros_like(mask, dtype=np.float32)
 
-    iou0 = compute_box_mask_iou(cand0_boxes, gt)
-    iou1 = compute_box_mask_iou(cand1_boxes, gt)
+    right = gt.copy()
+    candidates = [
+        {"cand_id": 0, "boxes": [[0.1, 0.1, 0.3, 0.3]] * 10},
+        {"cand_id": 1, "boxes": [[0.6, 0.5, 0.95, 0.9]] * 10},
+    ]
+    chosen_id, scores = select_candidate_by_mask_iou(candidates, gt, MaskTool(), "train_uid")
+    assert scores[1]["iou"] > scores[0]["iou"]
+    assert chosen_id == 1
 
-    assert iou1 > iou0
-    chosen_id = 1 if iou1 > iou0 else 0
-    assert chosen_id == 1, "Should select candidate 1 matching GT location, not candidate 0"
+
+def test_mock_inspection_observations_vary_by_video():
+    from tools.client import ToolClient
+    from rl_grpo.constants import format_observation
+
+    fixtures_dir = os.path.join(REPO_ROOT, "tests", "fixtures")
+    client = ToolClient(
+        use_mock_fallback=True,
+        use_cache=False,
+        media_dir=fixtures_dir,
+    )
+    first_obs = format_observation(
+        "inspect_frames",
+        client.inspect_frames("moving_rect", 0, 9),
+    )
+    second_obs = format_observation(
+        "inspect_frames",
+        client.inspect_frames("static_silent", 0, 9),
+    )
+    assert first_obs != second_obs
+
+
+def test_old_hardcoded_observations_are_absent():
+    source_path = os.path.join(REPO_ROOT, "scripts", "rl_grpo", "build_coldstart_data.py")
+    with open(source_path, "r", encoding="utf-8") as source_file:
+        source = source_file.read()
+    for literal in ("0.88", "0.14", "0.45"):
+        assert literal not in source
+
+
+def test_sft_rejects_mock_rows_without_mock_flag():
+    from scripts.rl_grpo.sft_action_format import reject_mock_rows
+
+    with pytest.raises(ValueError, match="contains mock rows"):
+        reject_mock_rows([{"uid": "mock_sample", "mock": True}], use_mock=False)
+    reject_mock_rows([{"uid": "mock_sample", "mock": True}], use_mock=True)
 
 
 def test_sft_checkpoint_split_format(tmp_path):

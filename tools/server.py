@@ -29,6 +29,8 @@ from tools.referdino_tool import ReferDINOTool, GroundingDINOTool
 from tools.sam2_tool import SAM2Tool
 from tools.mock_tools import MockToolServer
 from kg.retriever import retrieve
+from kg.build_kg import compute_audio_loudness_per_second, read_audio_waveform, resolve_media_paths
+from PIL import Image
 
 
 class RealToolServer:
@@ -53,6 +55,32 @@ class RealToolServer:
 
     def kg_retrieve(self, video_id: str, query: str, k_hops: int = 1) -> Dict[str, Any]:
         return retrieve(video_id, query, k_hops=k_hops, kg_dir=self.kg_dir)
+
+    def inspect_frames(
+        self,
+        video_id: str,
+        start: int,
+        end: int,
+        visible_candidate_ids: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        frame_paths, audio_path = resolve_media_paths(video_id, self.media_dir)
+        samples, sample_rate = read_audio_waveform(audio_path)
+        loudness = compute_audio_loudness_per_second(samples, sample_rate, num_seconds=10)
+        selected = loudness[start:end + 1]
+        with Image.open(frame_paths[0]) as image:
+            resolution = [image.width, image.height]
+        return {
+            "start": start,
+            "end": end,
+            "num_frames": end - start + 1,
+            "avg_audio_loudness": round(sum(selected) / len(selected), 3) if selected else 0.0,
+            "active_audio_secs": [
+                second for second in range(start, end + 1)
+                if loudness[second] > 0.05
+            ],
+            "visible_candidate_ids": list(visible_candidate_ids or []),
+            "resolution": resolution,
+        }
 
 
 class ToolRequestHandler(BaseHTTPRequestHandler):
@@ -105,6 +133,15 @@ class ToolRequestHandler(BaseHTTPRequestHandler):
                 query = req_data.get("query", "")
                 k_hops = req_data.get("k_hops", 1)
                 result = self.tool_server.kg_retrieve(video_id, query, k_hops=k_hops)
+                self._send_json(200, result)
+
+            elif self.path == "/inspect_frames":
+                result = self.tool_server.inspect_frames(
+                    req_data.get("video_id", ""),
+                    req_data.get("start", 0),
+                    req_data.get("end", 9),
+                    req_data.get("visible_candidate_ids", []),
+                )
                 self._send_json(200, result)
 
             else:

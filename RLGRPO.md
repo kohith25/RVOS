@@ -1,6 +1,6 @@
 # RL-GRPO Mode for TGS-Agent
 
-This document describes the **RL (GRPO) mode** added on top of the original TGS-Agent pipeline. All original TGS files remain byte-identical; only the files listed below are added/modified.
+This document describes the RL (GRPO) extensions to TGS-Agent. Original TGS files are guarded by the normalized SHA-256 manifest in `tests/test_file_hashes.py`; do not edit those files.
 
 > **Important:** All metrics are computed by the original `utils/avss_utils.py` functions (`mask_iou`, `Eval_Fmeasure`, `metric_s_for_null_batch`). No metric fabrication, no silent fallbacks.
 
@@ -26,13 +26,14 @@ This document describes the **RL (GRPO) mode** added on top of the original TGS-
 | `rl_grpo/trainer/grpo_trainer_tgs_v2.py` | GRPO trainer with PPO clipping + k3 KL |
 | `tools/server.py` | Tool server (ReferDINO + SAM2, `--grounder` flag) |
 | `tools/client.py` | Tool client with disk cache + mock fallback |
+| `tools/mock_tools.py` | Explicitly selected mock tools |
 | `tools/sam2_tool.py` | SAM2 wrapper (returns masks + logits tuple) |
 | `tools/referdino_tool.py` | ReferDINO + GroundingDINO wrappers |
-| `tools/mock_tools.py` | Mock tools for CPU-only dev/CI |
-| `kg/build_kg.py` | Knowledge graph builder (AudioSet labels) |
+| `kg/build_kg.py` | Per-video multimodal KG builder with batched detection and config-aware cache |
 | `kg/audioset_label_map.py` | AudioSet label vocabulary |
 | `configs/rl_config.py` | RL hyperparameter config |
-| `tests/test_*.py` | Full test suite (58 passed, 5 skipped) |
+| `scripts/check_manifest_unchanged.py` | Prevent unapproved changes to the original-file manifest |
+| `tests/test_*.py` | Unit and optional real-weight integration tests |
 
 ---
 
@@ -61,15 +62,40 @@ python tools/server.py --port 8088 --grounder gdino
 ```
 
 ### ReferDINO Environment & Setup Notes
-ReferDINO (ICCV 2025: *Referring Video Object Segmentation with Visual Grounding Foundations*) is the clip-level spatio-temporal referring grounder.
-- **Checkpoint Location:** Place `referdino_swin_base.pth` and `referdino_config.py` in `pretrained_weights/referdino/`.
-- **Download Instructions:** Download weights and config from the official repository: [ReferDINO GitHub](https://github.com/referdino/ReferDINO).
-- **Smoke Test:** Run on a single video clip to verify installation:
-  ```bash
-  python scripts/smoke_referdino.py --video_dir ./REFAVS/media/vid_001 --expr "the person playing guitar"
-  ```
-- **Tool Server Endpoint:** The server exposes `GET /info` which returns the actual instantiated grounder class (`ReferDINOTool` vs `GroundingDINOTool`), ensuring `results.json` records verified model provenance.
+ReferDINO is supported through its actual upstream inference code, not a local reimplementation of its model API.
 
+- Repository: [iSEE-Laboratory/ReferDINO](https://github.com/iSEE-Laboratory/ReferDINO).
+- The adapter uses upstream `demo_video.py`, `models.build_model(args)`, and `model.infer(samples, [text], [target])`.
+- The shipped default config is `configs/ytvos_swinb.yaml`; the shipped default checkpoint is `ckpt/ryt_mevis_swinb.pth`, available from the [ReferDINO Hugging Face model zoo](https://huggingface.co/liangtm/referdino/tree/main).
+- The checkpoint is loaded using `checkpoint["model_state_dict"]`, as in upstream `demo_video.py`. Its inference outputs are `pred_logits`, `pred_masks`, and `pred_boxes`. The adapter uses the demo's temporal query scoring and returns the selected query as **one candidate, ID 0**. It does not invent alternatives; SAM2 receives this candidate's per-frame boxes.
+- `demo_video.py` accepts `--tracking_alpha` and assigns it to `args.GroundingDINO.tracking_alpha`; the adapter uses the upstream config value (0.1 by default).
+
+Install upstream code and weights in the environment used to run the tool server (`dino`):
+
+```bash
+git clone https://github.com/iSEE-Laboratory/ReferDINO.git third_party/ReferDINO
+cd third_party/ReferDINO
+conda install pytorch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 pytorch-cuda=11.8 -c pytorch -c nvidia
+cd models/GroundingDINO/ops
+python setup.py build install
+cd ../../..
+pip install -r requirements.txt
+```
+
+Follow the upstream README to place `groundingdino_swint_ogc.pth` and `groundingdino_swinb_cogcoor.pth` under the ReferDINO checkout's `pretrained/` directory. Download `ryt_mevis_swinb.pth` from the model zoo and place it under `third_party/ReferDINO/ckpt/`.
+
+Run real inference on one ten-frame Ref-AVS clip:
+
+  ```bash
+  python scripts/smoke_referdino.py \
+      --video_dir ./REFAVS/media/<video_id> \
+      --expr "the person playing guitar" \
+      --repo_dir ./third_party/ReferDINO
+  ```
+
+The smoke test exits with an error if the checkout, imports, config, or checkpoint are unavailable. `--mock` is separate and CPU-only; it does not validate real ReferDINO.
+
+The tool server exposes `GET /info` for the configured grounder and `POST /inspect_frames` for observations generated from actual clip audio. Start it with `--grounder referdino` to select this integration.
 
 ---
 
@@ -80,9 +106,10 @@ Build scripted trajectories and fine-tune the model's action format:
 ```bash
 conda activate think
 
-# Build 4-turn scripted trajectories from the train split
+# Build real trajectories from train media; candidate labels use SAM2 mask IoU against train GT only
 python scripts/rl_grpo/build_coldstart_data.py \
-    --meta_csv_path data/ref_avs_meta.csv \
+    --meta_csv_path ./R2AVSBench/RefAVSBench_metadata.csv \
+    --num_samples 20 \
     --out_path work_dirs_coldstart/coldstart_data.jsonl
 
 # SFT on action format (saves finetune_weights.bin)
@@ -180,7 +207,7 @@ python scripts/run_pipeline.py \
     --test_name test_s --out_dir /tmp/rl_mock_out
 ```
 
-> **Note:** Mock metrics are placeholder zeros and cannot be compared against real results without `--allow_mock`. Never report mock metrics as real results.
+> **Note:** Mock outputs are synthetic and are not research results. Never report mock metrics or mock trajectories as real results; `compare_runs.py` rejects mock result files unless explicitly overridden.
 
 ---
 
@@ -192,7 +219,7 @@ python scripts/run_pipeline.py \
 | Metric sources | Only `utils/avss_utils.py` — no fabrication (`- 0.03` banned) |
 | Mocks | Only via explicit `--mock` flag |
 | Missing weights/server | Raises `FileNotFoundError` / `ConnectionError` — no silent fallback |
-| Reference model | Frozen copy of SFT weights; KL ≈ 0 at step 0 |
+| Reference model | Default `peft_disable` reference uses no second model; `copy` requires memory for a second 7B model |
 | Checkpoint format | `finetune_weights.bin` (LoRA) + `non_lora_trainables.bin` (projectors) |
 | SAM2 output | Returns `(masks, logits)` tuple — logits passed to `Eval_Fmeasure` |
 | compare_runs mock IDs | Rejected unless `--allow_mock` passed |
@@ -202,13 +229,93 @@ python scripts/run_pipeline.py \
 ## Running Tests
 
 ```bash
-# Full test suite (58 passed, 5 skipped — skips require PyTorch/GPU)
-python -m pytest TGS-Agent/tests/ -v
+# Full test suite
+python -m pytest -q
 
 # Compile-check all new Python files
-python -m compileall TGS-Agent/rl_grpo TGS-Agent/tools TGS-Agent/kg \
-    TGS-Agent/scripts/rl_grpo TGS-Agent/tests
+python -m compileall -q rl_grpo tools kg scripts tests
 ```
+
+---
+
+## GPU Validation Run Order
+
+Replace the paths and IDs below with the local dataset/checkpoint values. For a five-reference baseline, provide a metadata CSV containing the selected five references; the dispatcher does not expose a `--max_samples` option.
+
+### a. Original pipeline and reproduction check
+
+```bash
+python scripts/run_pipeline.py --use_rl false --stage all --test_name test_s \
+    --meta_csv_path ./R2AVSBench/refavs_first5.csv \
+    --ckpt_dir <TGS_SFT_CHECKPOINT> --avs_ckpt_dir <TGS_SFT_DIR> \
+    --out_dir results/original_test_s
+
+python scripts/verify_original_reproduction.py --num_videos 5 --test_name test_s \
+    --meta_csv_path ./R2AVSBench/RefAVSBench_metadata.csv \
+    --ckpt_dir <TGS_SFT_CHECKPOINT> --avs_ckpt_dir <TGS_SFT_DIR> \
+    --out_dir_pipeline results/verify_pipeline
+```
+
+### b. Real ReferDINO inference
+
+```bash
+python scripts/smoke_referdino.py --video_dir ./REFAVS/media/<video_id> \
+    --expr "the object making a sound on the left of the guitar" \
+    --repo_dir ./third_party/ReferDINO
+```
+
+### c. Build KG for two real videos
+
+```bash
+python kg/build_kg.py --video_id <train_uid_1> --media_dir ./REFAVS/media \
+    --meta_csv_path ./R2AVSBench/RefAVSBench_metadata.csv --kg_dir kg_cache
+python kg/build_kg.py --video_id <train_uid_2> --media_dir ./REFAVS/media \
+    --meta_csv_path ./R2AVSBench/RefAVSBench_metadata.csv --kg_dir kg_cache
+```
+
+### d. Cold-start SFT and format gate
+
+Keep the tool server running in the `dino` environment. Candidate choice uses SAM2 masks and train GT only; the GT IoU is stored as training metadata, not in agent prompts.
+
+```bash
+python scripts/rl_grpo/build_coldstart_data.py \
+    --meta_csv_path ./R2AVSBench/RefAVSBench_metadata.csv \
+    --num_samples 20 --out_path work_dirs_coldstart/coldstart_data.jsonl
+python scripts/rl_grpo/sft_action_format.py \
+    --model_name_or_path <LLAMA_2_7B_CHAT_DIR> \
+    --avs_ckpt_dir <TGS_SFT_DIR> \
+    --data_path work_dirs_coldstart/coldstart_data.jsonl \
+    --output_dir work_dirs_coldstart/sft_action
+python scripts/rl_grpo/check_format_validity.py \
+    --ckpt_dir work_dirs_coldstart/sft_action \
+    --avs_ckpt_dir <TGS_SFT_DIR> \
+    --model_name_or_path <LLAMA_2_7B_CHAT_DIR> \
+    --threshold 0.95
+```
+
+Proceed to GRPO only if the real format-validity run reaches at least 0.95.
+
+### e. Five GRPO steps, inference, and comparison
+
+```bash
+python scripts/rl_grpo/train_rl_tgs.py \
+    --model_name_or_path <LLAMA_2_7B_CHAT_DIR> \
+    --ckpt_dir work_dirs_coldstart/sft_action \
+    --out_dir work_dirs_RL/tgs_grpo_5steps \
+    --max_steps 5 --num_generations 4 \
+    --grounder referdino --use_kg true
+
+python scripts/rl_grpo/infer_pipeline.py \
+    --ckpt_dir work_dirs_RL/tgs_grpo_5steps \
+    --avs_ckpt_dir <TGS_SFT_DIR> \
+    --out_dir results/rl_test_s \
+    --test_name test_s --grounder referdino --use_kg true
+
+python scripts/compare_runs.py --run1 results/original_test_s \
+    --run2 results/rl_test_s --label1 "Original TGS" --label2 "RL GRPO"
+```
+
+These are real-weight instructions, not a claim that GPU evaluation has already run. The current development tests use CPU mocks and fixtures.
 
 ---
 
@@ -224,6 +331,7 @@ The trainer (`rl_grpo/trainer/grpo_trainer_tgs_v2.py`) implements:
 - **MM module freezing**: projectors, QFormers frozen by default; enabled with `--train_mm_modules`
 - **Gradient clipping**: `max_grad_norm=1.0` via `clip_grad_norm_`
 - **Checkpoint format**: saves `finetune_weights.bin` (LoRA) + `non_lora_trainables.bin` (projectors/QFormers) exactly as expected by `inference_hyper_lora.py`
+- **Step-0 policy ratio**: logs the measured maximum `|exp(current_logp - rollout_logp) - 1|` before the first optimizer update; LoRA dropout is disabled while recomputing those log probabilities.
 
 ---
 

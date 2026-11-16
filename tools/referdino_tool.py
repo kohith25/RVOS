@@ -15,6 +15,7 @@ Implements:
 
 import os
 import sys
+from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import List, Optional, Dict, Any, Tuple
 import numpy as np
@@ -62,27 +63,32 @@ def compute_mean_area_from_boxes(boxes: List[List[float]]) -> float:
 
 class ReferDINOTool:
     """
-    ReferDINO Grounding Tool (ICCV 2025: Referring Video Object Segmentation).
-    Processes a 10-frame video clip jointly conditioned on the full natural language
-    referring expression and produces spatio-temporal object tracklets.
+    Adapter for the official ReferDINO ``demo_video.py`` inference path.
+
+    The upstream demo selects one query track for a sentence. This adapter returns
+    that track as candidate 0; it does not synthesize additional candidates.
     """
     def __init__(
         self,
-        config_path: str = "pretrained_weights/referdino/referdino_config.py",
-        checkpoint_path: str = "pretrained_weights/referdino/referdino_swin_base.pth",
+        config_path: str = "configs/ytvos_swinb.yaml",
+        checkpoint_path: str = "ckpt/ryt_mevis_swinb.pth",
+        referdino_repo: str = "third_party/ReferDINO",
         device: Optional[str] = None,
         media_dir: str = "./REFAVS/media",
         score_threshold: float = 0.20,
         use_mock: bool = False,
         model: Optional[Any] = None,
     ):
-        self.config_path = config_path
-        self.checkpoint_path = checkpoint_path
+        self.repo_dir = os.path.abspath(referdino_repo)
+        self.config_path = self._resolve_upstream_path(config_path)
+        self.checkpoint_path = self._resolve_upstream_path(checkpoint_path)
         self.device = device or ("cuda" if (HAS_TORCH and torch.cuda.is_available()) else "cpu")
         self.media_dir = media_dir
         self.score_threshold = score_threshold
         self.use_mock = use_mock
         self.model = model
+        self._runtime = None
+        self._args = None
 
         if self.use_mock:
             self._mock_impl = MockReferDINOTool()
@@ -91,34 +97,96 @@ class ReferDINOTool:
             if self.model is None:
                 self._load_model()
 
-    def _load_model(self):
-        """Loads ReferDINO model. Raises FileNotFoundError if checkpoint missing."""
-        if not HAS_TORCH:
-            raise RuntimeError("PyTorch is required for ReferDINO inference.")
+    def _resolve_upstream_path(self, path: str) -> str:
+        if os.path.isabs(path):
+            return path
+        return os.path.join(self.repo_dir, path)
 
-        if not os.path.exists(self.checkpoint_path):
+    def _load_model(self):
+        """Load the model using the builder and checkpoint format used upstream."""
+        if not os.path.isdir(self.repo_dir):
             raise FileNotFoundError(
-                f"ReferDINO checkpoint not found at: '{self.checkpoint_path}'. "
-                "Please download the ReferDINO checkpoint from the official repository "
-                "(https://github.com/referdino/ReferDINO) and place it in pretrained_weights/referdino/, "
-                "or pass use_mock=True / --mock to evaluate with mocks."
+                f"ReferDINO repository not found at '{self.repo_dir}'. "
+                "Clone https://github.com/iSEE-Laboratory/ReferDINO to "
+                "third_party/ReferDINO and follow its README setup steps "
+                "documented in RLGRPO.md."
+            )
+        if not os.path.isfile(self.config_path):
+            raise FileNotFoundError(
+                f"ReferDINO config not found at '{self.config_path}'. "
+                "Use the upstream configs/ytvos_swinb.yaml from "
+                "https://github.com/iSEE-Laboratory/ReferDINO."
+            )
+        if not os.path.isfile(self.checkpoint_path):
+            raise FileNotFoundError(
+                f"ReferDINO checkpoint not found at '{self.checkpoint_path}'. "
+                "Download ckpt/ryt_mevis_swinb.pth from "
+                "https://huggingface.co/liangtm/referdino/tree/main, or set "
+                "checkpoint_path to another checkpoint listed in the upstream README."
+            )
+        if not HAS_TORCH:
+            raise ImportError(
+                "PyTorch is required for ReferDINO. Follow the ReferDINO README "
+                "environment setup in RLGRPO.md."
             )
 
-        # Dynamic loading of ReferDINO architecture
+        repo_prefix = os.path.normcase(os.path.realpath(self.repo_dir)) + os.sep
+        loaded_models = sys.modules.get("models")
+        loaded_path = getattr(loaded_models, "__file__", None)
+        if loaded_path and not os.path.normcase(os.path.realpath(loaded_path)).startswith(repo_prefix):
+            raise ImportError(
+                "ReferDINO and TGS-Agent both use the top-level package name 'models'. "
+                "Run ReferDINO in the separate tool-server process/environment described "
+                "in RLGRPO.md so its upstream models package can be imported without conflict."
+            )
+        if self.repo_dir not in sys.path:
+            sys.path.insert(0, self.repo_dir)
         try:
-            # If ReferDINO package or repo is vendored
-            from refer_dino.models import build_referdino_model
-            self.model = build_referdino_model(self.config_path, self.checkpoint_path, device=self.device)
+            try:
+                from easydict import EasyDict
+                from ruamel.yaml import YAML
+                import torch.nn.functional as functional
+                import torchvision.transforms as transforms
+                from torch.cuda.amp import autocast
+                from misc import nested_tensor_from_videos_list
+                from models import build_model
+            except ImportError as exc:
+                raise ImportError(
+                    "Could not import ReferDINO's upstream inference dependencies. "
+                    "Install dependencies and build its custom attention ops as described "
+                    "in the ReferDINO README and RLGRPO.md."
+                ) from exc
+
+            with open(self.config_path, "r", encoding="utf-8") as config_file:
+                config = YAML(typ="safe", pure=True).load(config_file)
+            config = {key: value["value"] for key, value in config.items()}
+            config.update({
+                "checkpoint_path": self.checkpoint_path,
+                "device": self.device,
+                "frame_step": 1,
+                "tracking_alpha": 0.1,
+            })
+            self._args = EasyDict(config)
+            self._args.GroundingDINO.tracking_alpha = self._args.tracking_alpha
+
+            self.model, _, _ = build_model(self._args)
+            checkpoint = torch.load(self.checkpoint_path, map_location="cpu")
+            self.model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+            self.model.to(self.device)
             self.model.eval()
-        except ImportError:
-            # Generic torch checkpoint loader if refer_dino is not in sys.path
-            ckpt = torch.load(self.checkpoint_path, map_location=self.device, weights_only=False)
-            if hasattr(ckpt, "eval"):
-                self.model = ckpt
-            elif isinstance(ckpt, dict) and "model" in ckpt:
-                self.model = ckpt["model"]
-            else:
-                self.model = ckpt
+            self._runtime = {
+                "functional": functional,
+                "transforms": transforms,
+                "autocast": autocast,
+                "nested_tensor_from_videos_list": nested_tensor_from_videos_list,
+            }
+        finally:
+            for name, module in list(sys.modules.items()):
+                module_path = getattr(module, "__file__", None)
+                if module_path and os.path.normcase(os.path.realpath(module_path)).startswith(repo_prefix):
+                    sys.modules.pop(name, None)
+            if self.repo_dir in sys.path:
+                sys.path.remove(self.repo_dir)
 
     def _resolve_clip_frames(self, video_id: str) -> List[str]:
         vid = video_id.rsplit("_", 2)[0] if "_" in video_id else video_id
@@ -200,46 +268,66 @@ class ReferDINOTool:
                 c.cand_id = i
             return candidates
 
-        # Real ReferDINO inference over clip
+        # Match the preprocessing and model.infer API in the upstream demo_video.py.
         frames_pil = [Image.open(p).convert("RGB") for p in frame_paths]
-        # ReferDINO forward pass
+        if self._runtime is None:
+            self._load_model()
+        transforms = self._runtime["transforms"]
+        functional = self._runtime["functional"]
+        transform = transforms.Compose([
+            transforms.Resize(360),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+        image_sizes = [frame.size for frame in frames_pil]
+        imgs = torch.stack([transform(frame) for frame in frames_pil], dim=0).to(self.device)
+        samples = self._runtime["nested_tensor_from_videos_list"](
+            imgs[None], size_divisibility=1
+        )
+        img_h, img_w = imgs.shape[-2:]
+        target = {"size": torch.as_tensor([int(img_h), int(img_w)], device=self.device)}
+        sentence = " ".join(text.lower().split())
         with torch.no_grad():
-            outputs = self.model(frames_pil, text)
+            with self._runtime["autocast"](self._args.enable_amp):
+                outputs = self.model.infer(samples, [sentence], [target])
 
-        candidates = []
-        pred_boxes = outputs.get("pred_boxes", [])  # list of [10, 4] per track
-        pred_scores = outputs.get("pred_scores", [])
-        pred_masks = outputs.get("pred_masks", [None] * len(pred_boxes))
+        pred_logits = outputs["pred_logits"][0]
+        pred_masks = outputs["pred_masks"][0]
+        pred_boxes = outputs["pred_boxes"][0]
+        query_scores = pred_logits.sigmoid().mean(0).max(-1).values
+        query_id = int(query_scores.argmax().item())
+        score = float(query_scores[query_id].item())
+        frame_indices = torch.arange(len(frames_pil), device=pred_boxes.device)
 
-        for idx, (boxes, score) in enumerate(zip(pred_boxes, pred_scores)):
-            if float(score) < self.score_threshold and idx >= 1:
-                continue
-            boxes_list = boxes.tolist() if hasattr(boxes, "tolist") else boxes
-            mask_data = pred_masks[idx].tolist() if hasattr(pred_masks[idx], "tolist") else pred_masks[idx]
-            candidates.append(Candidate(
-                cand_id=idx,
-                boxes=boxes_list,
-                masks=mask_data,
-                score=round(float(score), 3),
-                mean_area=round(compute_mean_area_from_boxes(boxes_list), 3),
-                side=compute_side_from_boxes(boxes_list),
-            ))
+        cxcywh = pred_boxes[frame_indices, query_id].detach().cpu().numpy()
+        boxes = np.stack([
+            cxcywh[:, 0] - cxcywh[:, 2] / 2.0,
+            cxcywh[:, 1] - cxcywh[:, 3] / 2.0,
+            cxcywh[:, 0] + cxcywh[:, 2] / 2.0,
+            cxcywh[:, 1] + cxcywh[:, 3] / 2.0,
+        ], axis=1)
+        boxes = np.clip(boxes, 0.0, 1.0).tolist()
 
-        if not candidates:
-            # Provide zero-candidate fallback if nothing detected above threshold
-            candidates.append(Candidate(
-                cand_id=0,
-                boxes=[[0.0, 0.0, 0.0, 0.0]] * 10,
-                masks=None,
-                score=0.0,
-                mean_area=0.0,
-                side="center",
-            ))
+        mask_logits = pred_masks[frame_indices, query_id, :, :]
+        mask_logits = mask_logits[:, :img_h, :img_w]
+        masks = []
+        for frame_idx, (origin_w, origin_h) in enumerate(image_sizes):
+            frame_mask = functional.interpolate(
+                mask_logits[frame_idx].float()[None, None],
+                size=(origin_h, origin_w),
+                mode="bilinear",
+                align_corners=False,
+            )
+            masks.append((frame_mask.sigmoid()[0, 0] > 0.5).to(torch.uint8).cpu().tolist())
 
-        candidates.sort(key=lambda c: c.score, reverse=True)
-        for i, c in enumerate(candidates):
-            c.cand_id = i
-        return candidates
+        return [Candidate(
+            cand_id=0,
+            boxes=boxes,
+            masks=masks,
+            score=round(score, 3),
+            mean_area=round(compute_mean_area_from_boxes(boxes), 3),
+            side=compute_side_from_boxes(boxes),
+        )]
 
 
 class GroundingDINOTool:

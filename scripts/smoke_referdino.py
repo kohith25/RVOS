@@ -22,8 +22,9 @@ def main():
     parser = argparse.ArgumentParser(description="Smoke test for ReferDINO on a single video clip")
     parser.add_argument("--video_dir", type=str, required=True, help="Path to video directory containing frames/ or 0..9.jpg")
     parser.add_argument("--expr", type=str, required=True, help="Natural language referring expression")
-    parser.add_argument("--ckpt", type=str, default="pretrained_weights/referdino/referdino_swin_base.pth", help="Path to ReferDINO weights")
-    parser.add_argument("--config", type=str, default="pretrained_weights/referdino/referdino_config.py", help="Path to ReferDINO config")
+    parser.add_argument("--repo_dir", type=str, default="third_party/ReferDINO", help="ReferDINO repository checkout")
+    parser.add_argument("--ckpt", type=str, default="ckpt/ryt_mevis_swinb.pth", help="Path relative to ReferDINO repo or absolute")
+    parser.add_argument("--config", type=str, default="configs/ytvos_swinb.yaml", help="Path relative to ReferDINO repo or absolute")
     parser.add_argument("--mock", action="store_true", help="Run with mock implementation on CPU")
     args = parser.parse_args()
 
@@ -37,6 +38,7 @@ def main():
     tool = ReferDINOTool(
         config_path=args.config,
         checkpoint_path=args.ckpt,
+        referdino_repo=args.repo_dir,
         media_dir=media_dir,
         use_mock=args.mock,
     )
@@ -44,7 +46,14 @@ def main():
     candidates = tool.run(video_id, args.expr)
     print(f"\n[Result] Extracted {len(candidates)} candidate tracks:")
     for c in candidates:
-        print(f"  - Candidate {c.cand_id}: score={c.score:.3f}, side={c.side}, mean_area={c.mean_area:.3f}, num_boxes={len(c.boxes)}")
+        print({
+            "cand_id": c.cand_id,
+            "score": c.score,
+            "side": c.side,
+            "mean_area": c.mean_area,
+            "boxes": c.boxes,
+            "num_masks": len(c.masks) if c.masks is not None else 0,
+        })
 
 
 if __name__ == "__main__":

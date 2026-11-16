@@ -35,6 +35,19 @@ from kg.audioset_label_map import get_audioset_label, AUDIOSET_LABELS
 
 SCHEMA_VERSION = 2
 DEFAULT_KG_DIR = "kg_cache"
+DEFAULT_OBJECT_VOCAB = [
+    "accordion", "airplane", "baby", "bass", "boat", "boy", "car", "cat",
+    "cello", "chair", "clarinet", "clock", "couch", "dog", "drum",
+    "emergency car", "flute", "girl", "guitar", "gun", "guzheng", "hair dryer",
+    "handpan", "harmonica", "harp", "helicopter", "keyboard", "leopard", "lion",
+    "man", "marimba", "motorcycle", "mower", "piano", "pig", "pipa", "razor",
+    "saw", "saxophone", "sheep", "sitar", "tabla", "table", "tiger", "truck",
+    "tuba", "ukulele", "vacuum cleaner", "violin", "wolf", "woman",
+]
+assert len(DEFAULT_OBJECT_VOCAB) == 51
+
+DEFAULT_BEATS_CKPT = "pretrained_weights/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt"
+MAX_PROMPT_TOKENS = 256
 
 
 def compute_config_hash(config_dict: Dict[str, Any]) -> str:
@@ -132,12 +145,17 @@ def read_audio_waveform(audio_path: str) -> Tuple[np.ndarray, int]:
 
     try:
         import soundfile as sf
-        data, sr = sf.read(audio_path, dtype="float32")
+    except ImportError:
+        sf = None
+
+    if sf is not None:
+        try:
+            data, sr = sf.read(audio_path, dtype="float32")
+        except Exception as e:
+            raise RuntimeError(f"Failed to read audio waveform from '{audio_path}': {e}") from e
         if data.ndim > 1:
             data = data.mean(axis=1)
         return data, sr
-    except Exception:
-        pass
 
     try:
         with wave.open(audio_path, "rb") as wf:
@@ -253,175 +271,220 @@ def extract_noun_phrases(text: str) -> List[str]:
 
 def get_object_vocabulary(meta_csv_path: Optional[str] = None) -> List[str]:
     """Extracts or returns the Ref-AVSBench object vocabulary."""
-    if meta_csv_path and os.path.exists(meta_csv_path):
-        try:
-            vocab = set()
-            with open(meta_csv_path, "r", encoding="utf-8") as f:
-                reader = csv.reader(f)
-                for row in reader:
-                    if len(row) >= 2:
-                        uid = row[1]
-                        parts = uid.rsplit("_", 2)
-                        if len(parts) >= 3 and parts[1]:
-                            vocab.add(parts[1].lower().replace("-", " "))
-            if vocab:
-                return sorted(list(vocab))
-        except Exception:
-            pass
+    if not meta_csv_path:
+        return list(DEFAULT_OBJECT_VOCAB)
+    if not os.path.isfile(meta_csv_path):
+        raise FileNotFoundError(f"Ref-AVSBench metadata CSV not found: {meta_csv_path}")
 
-    # Standard AVSBench 51 classes
-    return [
-        "accordion", "airplane", "ambulance", "baby", "banjo", "bassoon",
-        "bell", "bongo", "car", "cat", "cello", "clarinet", "dog",
-        "donkey", "drum", "duck", "electric guitar", "elephant", "flute",
-        "french horn", "frog", "giant panda", "gong", "guitar", "gun",
-        "harmonica", "harp", "helicopter", "horse", "keyboard", "lawn mower",
-        "lion", "mandolin", "marimba", "motorcycle", "oboe", "person",
-        "piano", "police car", "saxophone", "sheep", "singing", "table tennis",
-        "tank", "tiger", "tractor", "train", "trombone", "truck", "trumpet",
-        "tuba", "violin", "whale", "xylophone"
-    ]
+    vocab = set()
+    with open(meta_csv_path, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) >= 2:
+                parts = row[1].rsplit("_", 2)
+                if len(parts) >= 3 and parts[1]:
+                    label = parts[1].lower().replace("-", " ")
+                    if label != "null":
+                        vocab.add(label)
+    if not vocab:
+        raise ValueError(f"No object classes found in Ref-AVSBench metadata: {meta_csv_path}")
+    return sorted(vocab)
+
+
+def build_detector_prompts(
+    noun_phrases: List[str],
+    vocabulary: List[str],
+    classes_per_prompt: int = 10,
+    token_limit: int = MAX_PROMPT_TOKENS,
+) -> List[str]:
+    """Batch class names while repeating reference terms in every prompt."""
+    if classes_per_prompt < 1:
+        raise ValueError("classes_per_prompt must be positive")
+    nouns = list(dict.fromkeys(phrase.strip() for phrase in noun_phrases if phrase.strip()))
+    prompts = []
+    for offset in range(0, len(vocabulary), classes_per_prompt):
+        labels = vocabulary[offset:offset + classes_per_prompt]
+        prompt = " . ".join(nouns + labels) + " ."
+        token_count = len(prompt.split())
+        if token_count > token_limit:
+            raise ValueError(
+                f"GroundingDINO prompt is {token_count} whitespace tokens, exceeding "
+                f"the configured limit of {token_limit}; shorten the referring expression "
+                "or reduce classes_per_prompt."
+            )
+        prompts.append(prompt)
+    return prompts
 
 
 def run_grounding_dino_on_frames(
     frame_paths: List[str],
-    text_prompt: str,
+    text_prompts: List[str],
     detector: Optional[Any] = None,
     box_threshold: float = 0.15,
     text_threshold: float = 0.25,
 ) -> List[Dict[str, Any]]:
     """
-    Runs visual object detection on 10 frames and links detections into tracklets via IoU.
-    If detector is None, attempts to load real GroundingDINO; raises FileNotFoundError if weights absent.
+    Detect across every prompt and frame, merge duplicate boxes, then form IoU tracklets.
+    Injected detectors expose ``detect_frame(frame_path, text_prompt)``.
     """
-    if detector is not None:
-        return detector.extract_tracklets(frame_paths, text_prompt)
+    if not text_prompts:
+        return []
 
-    # Real GroundingDINO loading
-    ckpt_path = "gdino_checkpoints/groundingdino_swint_ogc.pth"
-    config_path = "grounding_dino/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+    model = None
+    load_image = None
+    predict = None
+    device = None
+    if detector is None:
+        ckpt_path = "gdino_checkpoints/groundingdino_swint_ogc.pth"
+        config_path = "grounding_dino/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(
+                f"GroundingDINO checkpoint not found at '{ckpt_path}'. "
+                "Download weights or provide an injected detector."
+            )
+        try:
+            import torch
+            from grounding_dino.groundingdino.util.inference import load_model, load_image, predict
+        except ImportError as e:
+            raise RuntimeError(f"Missing required dependencies for GroundingDINO: {e}") from e
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = load_model(config_path, ckpt_path, device=device)
 
-    if not os.path.exists(ckpt_path):
-        raise FileNotFoundError(
-            f"GroundingDINO checkpoint not found at '{ckpt_path}'. "
-            "Please download weights or provide an injected detector."
-        )
+    frame_detections = [[] for _ in frame_paths]
+    for frame_idx, frame_path in enumerate(frame_paths):
+        for text_prompt in text_prompts:
+            if detector is not None:
+                detections = detector.detect_frame(frame_path, text_prompt)
+                frame_detections[frame_idx].extend(detections)
+                continue
 
-    try:
-        import torch
-        from grounding_dino.groundingdino.util.inference import load_model, load_image, predict
-        from torchvision.ops import box_convert
-    except ImportError as e:
-        raise RuntimeError(f"Missing required dependencies for GroundingDINO: {e}")
+            _, image = load_image(frame_path)
+            boxes, logits, phrases = predict(
+                model=model,
+                image=image,
+                caption=text_prompt,
+                box_threshold=box_threshold,
+                text_threshold=text_threshold,
+                device=device,
+            )
+            for idx, (cx, cy, width, height) in enumerate(boxes.cpu().numpy()):
+                frame_detections[frame_idx].append({
+                    "box": [
+                        float(cx - width / 2.0),
+                        float(cy - height / 2.0),
+                        float(cx + width / 2.0),
+                        float(cy + height / 2.0),
+                    ],
+                    "score": float(logits[idx].item()),
+                    "label": phrases[idx] if idx < len(phrases) else "object",
+                })
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = load_model(config_path, ckpt_path, device=device)
+    merged = [non_max_suppression(detections) for detections in frame_detections]
+    return link_detections_into_tracklets(merged)
 
-    frame_detections = []
-    for fpath in frame_paths:
-        _, image = load_image(fpath)
-        boxes, logits, phrases = predict(
-            model=model,
-            image=image,
-            caption=text_prompt,
-            box_threshold=box_threshold,
-            text_threshold=text_threshold,
-            device=device
-        )
-        if boxes.shape[0] > 0:
-            xyxy = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").cpu().numpy()
-            scores = logits.cpu().numpy()
-            dets = [
-                {
-                    "box": xyxy[i].tolist(),
-                    "score": float(scores[i]),
-                    "label": phrases[i] if i < len(phrases) else "object"
-                }
-                for i in range(len(scores))
-            ]
-        else:
-            dets = []
-        frame_detections.append(dets)
 
-    # Greedy IoU matching across frames into tracklets
-    return link_detections_into_tracklets(frame_detections)
+def box_iou(box1: List[float], box2: List[float]) -> float:
+    if len(box1) != 4 or len(box2) != 4:
+        return 0.0
+    x1, y1 = max(box1[0], box2[0]), max(box1[1], box2[1])
+    x2, y2 = min(box1[2], box2[2]), min(box1[3], box2[3])
+    intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    area1 = max(0.0, box1[2] - box1[0]) * max(0.0, box1[3] - box1[1])
+    area2 = max(0.0, box2[2] - box2[0]) * max(0.0, box2[3] - box2[1])
+    union = area1 + area2 - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def non_max_suppression(
+    detections: List[Dict[str, Any]], iou_threshold: float = 0.5
+) -> List[Dict[str, Any]]:
+    """Keep the highest-confidence detection among overlapping prompt results."""
+    kept = []
+    for detection in sorted(detections, key=lambda item: item.get("score", 0.0), reverse=True):
+        if all(box_iou(detection["box"], prior["box"]) < iou_threshold for prior in kept):
+            kept.append(detection)
+    return kept
 
 
 def link_detections_into_tracklets(frame_detections: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     """
-    Links per-frame detections across 10 frames into tracklets via greedy spatial IoU.
+    Greedily links each frame's detections to the preceding frame by spatial IoU.
     """
-    def box_iou(b1, b2):
-        if len(b1) != 4 or len(b2) != 4 or b1 == [0, 0, 0, 0] or b2 == [0, 0, 0, 0]:
-            return 0.0
-        ix1, iy1 = max(b1[0], b2[0]), max(b1[1], b2[1])
-        ix2, iy2 = min(b1[2], b2[2]), min(b1[3], b2[3])
-        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-        a1 = max(0.0, b1[2] - b1[0]) * max(0.0, b1[3] - b1[1])
-        a2 = max(0.0, b2[2] - b2[0]) * max(0.0, b2[3] - b2[1])
-        union = a1 + a2 - inter
-        return inter / (union + 1e-6) if union > 0 else 0.0
-
     tracklets = []
-    num_frames = len(frame_detections)
-
-    for cand_idx in range(3):
-        track_boxes = []
-        track_scores = []
-        labels = []
-        last_box = None
-
-        for t in range(num_frames):
-            dets = frame_detections[t]
-            if not dets:
-                track_boxes.append(last_box if last_box is not None else [0.0, 0.0, 0.0, 0.0])
-                track_scores.append(0.0)
+    for frame_idx, detections in enumerate(frame_detections):
+        available_tracks = [
+            track for track in tracklets
+            if track["last_frame"] == frame_idx - 1
+        ]
+        pairs = sorted(
+            (
+                (box_iou(track["last_box"], detection["box"]), track_idx, det_idx)
+                for track_idx, track in enumerate(available_tracks)
+                for det_idx, detection in enumerate(detections)
+            ),
+            reverse=True,
+        )
+        matched_tracks = set()
+        matched_detections = set()
+        for iou, track_idx, det_idx in pairs:
+            if iou < 0.1:
+                break
+            if track_idx in matched_tracks or det_idx in matched_detections:
                 continue
+            track = available_tracks[track_idx]
+            detection = detections[det_idx]
+            track["frames"][frame_idx] = detection
+            track["last_box"] = detection["box"]
+            track["last_frame"] = frame_idx
+            matched_tracks.add(track_idx)
+            matched_detections.add(det_idx)
 
-            if last_box is None:
-                chosen = dets[min(cand_idx, len(dets) - 1)]
-            else:
-                ious = [box_iou(last_box, d["box"]) for d in dets]
-                best_i = int(np.argmax(ious))
-                chosen = dets[best_i] if ious[best_i] > 0.1 else dets[min(cand_idx, len(dets) - 1)]
+        for det_idx, detection in enumerate(detections):
+            if det_idx in matched_detections:
+                continue
+            frames = [None] * len(frame_detections)
+            frames[frame_idx] = detection
+            tracklets.append({
+                "frames": frames,
+                "last_box": detection["box"],
+                "last_frame": frame_idx,
+            })
 
-            track_boxes.append(chosen["box"])
-            track_scores.append(chosen.get("score", 0.5))
-            labels.append(chosen.get("label", "object"))
-            last_box = chosen["box"]
-
-        mean_score = float(np.mean(track_scores)) if track_scores else 0.0
-        primary_label = max(set(labels), key=labels.count) if labels else "object"
-
-        # Determine spatial location: left, center, right
-        centers_x = [(b[0] + b[2]) / 2.0 for b in track_boxes if b != [0, 0, 0, 0]]
+    output = []
+    for track in tracklets:
+        detections = track["frames"]
+        observed = [d for d in detections if d is not None]
+        if not observed:
+            continue
+        boxes = [d["box"] if d is not None else [0.0, 0.0, 0.0, 0.0] for d in detections]
+        scores = [float(d.get("score", 0.0)) for d in observed]
+        labels = [str(d.get("label", "object")) for d in observed]
+        centers_x = [(b[0] + b[2]) / 2.0 for b in boxes if b != [0.0, 0.0, 0.0, 0.0]]
         avg_cx = float(np.mean(centers_x)) if centers_x else 0.5
-        if avg_cx < 0.38:
-            side = "left"
-        elif avg_cx > 0.62:
-            side = "right"
-        else:
-            side = "center"
-
-        areas = [(b[2] - b[0]) * (b[3] - b[1]) for b in track_boxes if b != [0, 0, 0, 0]]
-        mean_area = float(np.mean(areas)) if areas else 0.0
-
-        tracklets.append({
-            "cand_id": cand_idx,
-            "label": primary_label,
-            "boxes": track_boxes,
-            "mean_score": round(mean_score, 3),
-            "mean_area": round(mean_area, 3),
+        side = "left" if avg_cx < 0.38 else "right" if avg_cx > 0.62 else "center"
+        areas = [
+            max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+            for b in boxes if b != [0.0, 0.0, 0.0, 0.0]
+        ]
+        label = max(set(labels), key=labels.count)
+        output.append({
+            "cand_id": len(output),
+            "label": label,
+            "boxes": boxes,
+            "mean_score": round(float(np.mean(scores)), 3),
+            "mean_area": round(float(np.mean(areas)) if areas else 0.0, 3),
             "spatial_location": side,
         })
-
-    return tracklets
+    output.sort(key=lambda item: item["mean_score"], reverse=True)
+    for cand_id, tracklet in enumerate(output):
+        tracklet["cand_id"] = cand_id
+    return output
 
 
 def extract_audio_events_beats(
     audio_path: str,
     tagger: Optional[Any] = None,
-    beats_ckpt: str = "pretrained_weights/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt"
+    beats_ckpt: str = DEFAULT_BEATS_CKPT,
 ) -> List[Dict[str, Any]]:
     """
     Extracts acoustic events per second using the BEATs model.
@@ -492,6 +555,10 @@ def build_graph(
     correlation_threshold: float = 0.3,
     loudness_floor: float = 0.05,
     force_recompute: bool = False,
+    detector_name: Optional[str] = None,
+    box_threshold: float = 0.15,
+    text_threshold: float = 0.25,
+    beats_ckpt: str = DEFAULT_BEATS_CKPT,
 ) -> Dict[str, Any]:
     """
     Builds the multimodal Knowledge Graph derived from real video frames and audio:
@@ -504,23 +571,32 @@ def build_graph(
     os.makedirs(kg_dir, exist_ok=True)
     cache_path = os.path.join(kg_dir, f"{video_id}.json")
 
+    vocab = get_object_vocabulary(meta_csv_path)
+    vocab_hash = hashlib.sha256(
+        json.dumps(vocab, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    effective_detector_name = detector_name or (
+        "GroundingDINO" if detector is None else detector.__class__.__name__
+    )
     config_info = {
         "schema_version": SCHEMA_VERSION,
         "corr_thresh": correlation_threshold,
         "loudness_floor": loudness_floor,
         "ref": reference_expression or "",
+        "vocabulary_hash": vocab_hash,
+        "detector_name": effective_detector_name,
+        "box_threshold": box_threshold,
+        "text_threshold": text_threshold,
+        "beats_checkpoint_name": os.path.basename(beats_ckpt),
     }
     config_hash = compute_config_hash(config_info)
 
     # Check cache validity
     if not force_recompute and os.path.exists(cache_path):
-        try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                cached = json.load(f)
-            if cached.get("schema_version") == SCHEMA_VERSION and cached.get("config_hash") == config_hash:
-                return cached
-        except Exception:
-            pass
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if cached.get("schema_version") == SCHEMA_VERSION and cached.get("config_hash") == config_hash:
+            return cached
 
     # 1. Resolve media paths (raises FileNotFoundError if missing)
     frame_paths, audio_path = resolve_media_paths(video_id, media_dir)
@@ -530,14 +606,14 @@ def build_graph(
 
     # 2. Visual Entity Extraction (GroundingDINO)
     noun_phrases = extract_noun_phrases(reference_expression or "")
-    vocab = get_object_vocabulary(meta_csv_path)
-    prompt_tokens = noun_phrases + [v for v in vocab[:10] if v not in noun_phrases]
-    text_prompt = " . ".join(prompt_tokens) + " ." if prompt_tokens else "object ."
+    text_prompts = build_detector_prompts(noun_phrases, vocab)
 
     tracklets = run_grounding_dino_on_frames(
         frame_paths=frame_paths,
-        text_prompt=text_prompt,
+        text_prompts=text_prompts,
         detector=detector,
+        box_threshold=box_threshold,
+        text_threshold=text_threshold,
     )
 
     # 3. Compute pixel-level motion energy for each visual tracklet
@@ -569,7 +645,6 @@ def build_graph(
         raw_events = audio_tagger.extract_events(audio_path)
     else:
         # Check BEATs weights availability
-        beats_ckpt = "pretrained_weights/BEATs_iter3_plus_AS2M_finetuned_on_AS2M_cpt2.pt"
         if not os.path.exists(beats_ckpt):
             raise FileNotFoundError(
                 f"BEATs acoustic checkpoint not found at '{beats_ckpt}'. "
@@ -701,9 +776,22 @@ def main():
     parser.add_argument("--media_dir", type=str, default="./REFAVS/media", help="Media directory")
     parser.add_argument("--kg_dir", type=str, default=DEFAULT_KG_DIR, help="Cache directory")
     parser.add_argument("--ref", type=str, default=None, help="Referring expression")
+    parser.add_argument("--meta_csv_path", type=str, default=None, help="Ref-AVSBench metadata CSV")
+    parser.add_argument("--box_threshold", type=float, default=0.15)
+    parser.add_argument("--text_threshold", type=float, default=0.25)
+    parser.add_argument("--beats_ckpt", type=str, default=DEFAULT_BEATS_CKPT)
     args = parser.parse_args()
 
-    g = build_graph(args.video_id, media_dir=args.media_dir, kg_dir=args.kg_dir, reference_expression=args.ref)
+    g = build_graph(
+        args.video_id,
+        media_dir=args.media_dir,
+        kg_dir=args.kg_dir,
+        reference_expression=args.ref,
+        meta_csv_path=args.meta_csv_path,
+        box_threshold=args.box_threshold,
+        text_threshold=args.text_threshold,
+        beats_ckpt=args.beats_ckpt,
+    )
     print(f"Generated KG for {args.video_id}: {g['num_nodes']} nodes, {g['num_edges']} edges.")
 
 

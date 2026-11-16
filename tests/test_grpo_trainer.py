@@ -40,6 +40,10 @@ class _TinyMockModel(nn.Module):
         self.projector_weight = nn.Parameter(torch.randn(4, 4))
         self.lora_A = nn.Parameter(torch.randn(4, 4))
         self.lora_B = nn.Parameter(torch.randn(4, 4))
+        self.lora_block = nn.Module()
+        self.lora_block.lora_dropout = nn.ModuleDict({
+            "default": nn.Dropout(p=0.2),
+        })
 
     def named_parameters(self, prefix="", recurse=True):
         # Return with realistic names so freeze logic can match substrings
@@ -53,6 +57,7 @@ class _TinyMockModel(nn.Module):
 
     def named_modules(self, memo=None, prefix="", remove_duplicate=True):
         yield prefix, self
+        yield "lora_block", self.lora_block
 
     def state_dict(self, **kwargs):
         return {
@@ -410,7 +415,7 @@ def test_ref_mode_in_rl_args():
 # ---------------------------------------------------------------------------
 # TEST 11 (Phase 4.5): step-0 ratio deviation reported in step_info
 # ---------------------------------------------------------------------------
-def test_step0_ratio_max_dev_in_step_info():
+def test_step0_ratio_max_dev_in_step_info(monkeypatch):
     """
     At global_step==0 the step() output must contain 'step0_ratio_max_dev'.
     For the mock path curr_logps == old_logps => ratio == 1.0 => dev ≈ 0.
@@ -426,6 +431,16 @@ def test_step0_ratio_max_dev_in_step_info():
         "video": None,
         "audio": None,
     }
+    dropout = trainer.policy_model.lora_block.lora_dropout["default"]
+    dropout.p = 0.2
+    observed_dropout_probabilities = []
+    original_exp = torch.exp
+
+    def observe_exp(value, *args, **kwargs):
+        observed_dropout_probabilities.append(dropout.p)
+        return original_exp(value, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "exp", observe_exp)
     info = trainer.step(sample)
     assert "step0_ratio_max_dev" in info, (
         f"step() at global_step=0 must include 'step0_ratio_max_dev'; got keys: {list(info.keys())}"
@@ -434,3 +449,7 @@ def test_step0_ratio_max_dev_in_step_info():
     assert info["step0_ratio_max_dev"] < 1e-3, (
         f"Mock path: step0_ratio_max_dev should be ~0, got {info['step0_ratio_max_dev']}"
     )
+    assert observed_dropout_probabilities and all(
+        probability == 0.0 for probability in observed_dropout_probabilities
+    )
+    assert dropout.p == 0.2, "LoRA dropout probability must be restored after the update."

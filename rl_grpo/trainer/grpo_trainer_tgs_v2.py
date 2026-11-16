@@ -135,6 +135,7 @@ class TGSGRPOTrainer:
         total_loss = torch.tensor(0.0, device=self.device)
         total_tokens = 0
         total_kl = 0.0
+        ratio_max_dev = None
         clip_eps = getattr(self.rl_args, "clip_epsilon", 0.2)
 
         # Set LoRA dropout to 0.0 during RL policy evaluation
@@ -229,9 +230,14 @@ class TGSGRPOTrainer:
                         ref_logps = old_logps_t.clone()
 
                 # Step 0 sanity check: ratio == 1.0 within float tolerance
-                if self.global_step == 0 and len(curr_logps) == len(old_logps_t):
+                if len(curr_logps) == len(old_logps_t):
                     diff = (torch.exp(curr_logps - old_logps_t) - 1.0).abs().max()
-                    if diff > 1e-2:
+                    diff_value = float(diff.item())
+                    ratio_max_dev = (
+                        diff_value if ratio_max_dev is None
+                        else max(ratio_max_dev, diff_value)
+                    )
+                    if self.global_step == 0 and diff > 1e-2:
                         logger.warning(f"Step 0 ratio check: max |ratio - 1| = {diff.item():.4f}")
 
                 # FIX 4(d): PPO Clipping
@@ -255,6 +261,7 @@ class TGSGRPOTrainer:
                         if adapter_name in module.lora_dropout:
                             module.lora_dropout[adapter_name].p = orig_p
 
+        self._last_ratio_max_dev = ratio_max_dev
         if total_tokens > 0:
             mean_loss = total_loss / total_tokens
             mean_kl = total_kl / total_tokens
@@ -294,6 +301,10 @@ class TGSGRPOTrainer:
         G = max(1, len(trajectories))
         for traj, adv in zip(trajectories, advantages):
             loss_i, kl_i, _ = self.compute_per_token_loss(traj, float(adv.item()))
+            if self.global_step == 0:
+                ratio_dev = getattr(self, "_last_ratio_max_dev", None)
+                if ratio_dev is not None:
+                    step0_ratio_max_dev = max(step0_ratio_max_dev or 0.0, ratio_dev)
             # Scale and immediately backward — avoids building a giant joint graph
             if loss_i.requires_grad:
                 (loss_i / G).backward()
@@ -306,22 +317,6 @@ class TGSGRPOTrainer:
         # Gradient clip + optimizer step (after all per-traj backwards)
         nn.utils.clip_grad_norm_(self.policy_model.parameters(), max_norm=self.rl_args.max_grad_norm)
         self.optimizer.step()
-
-        # Step-0 ratio deviation (single traj, first turn)
-        if self.global_step == 0 and trajectories:
-            first_traj = trajectories[0]
-            if first_traj.turns:
-                t0 = first_traj.turns[0]
-                if t0.old_logps and t0.completion_ids:
-                    old_t = torch.tensor(t0.old_logps, dtype=torch.float32, device=self.device)
-                    # In mock path curr == old, so ratio == 1; in real path compute it
-                    with torch.no_grad():
-                        if getattr(self.policy_model, "dummy_param", None) is not None:
-                            curr_t = old_t
-                        else:
-                            curr_t = old_t  # approximation for step-0 logging only
-                    dev = (torch.exp(curr_t - old_t) - 1.0).abs().max().item()
-                    step0_ratio_max_dev = dev
 
         self.global_step += 1
 
@@ -343,6 +338,9 @@ class TGSGRPOTrainer:
         }
         if step0_ratio_max_dev is not None:
             step_info["step0_ratio_max_dev"] = step0_ratio_max_dev
+            logger.info(
+                f"Step-0 policy ratio check: max |ratio - 1| = {step0_ratio_max_dev:.6g}"
+            )
 
         return step_info
 

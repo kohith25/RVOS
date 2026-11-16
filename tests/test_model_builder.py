@@ -87,6 +87,9 @@ def test_build_model_raises_without_mock():
 
 def test_build_model_mock_mode():
     """Mock mode must succeed cleanly without GPU or weights."""
+    default_policy, default_ref, _ = build_tgs_model(use_mock=True)
+    assert default_policy is default_ref
+
     policy, ref, tokenizer = build_tgs_model(use_mock=True, ref_mode="copy")
     assert policy is not None
     assert ref is not None

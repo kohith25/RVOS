@@ -21,6 +21,7 @@ import csv
 import argparse
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
+from PIL import Image
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
@@ -28,7 +29,9 @@ if REPO_ROOT not in sys.path:
 
 from rl_grpo.model_adapter import TGSModelAdapter
 from rl_grpo.constants import format_observation
-from tools.client import get_tool_client
+from rl_grpo.rewards import compute_mask_iou
+from tools.client import ToolClient, get_tool_client
+from tools.mock_tools import MockToolServer
 
 
 THOUGHT_TEMPLATES = {
@@ -77,34 +80,6 @@ THOUGHT_TEMPLATES = {
 }
 
 
-def compute_mask_iou(mask1: np.ndarray, mask2: np.ndarray) -> float:
-    """Computes mean intersection-over-union between two binary mask sequences."""
-    if mask1 is None or mask2 is None:
-        return 0.0
-    m1 = mask1 > 0
-    m2 = mask2 > 0
-    inter = np.logical_and(m1, m2).sum()
-    union = np.logical_or(m1, m2).sum()
-    if union == 0:
-        return 1.0 if inter == 0 else 0.0
-    return float(inter / union)
-
-
-def compute_box_mask_iou(boxes: List[List[float]], gt_masks: np.ndarray) -> float:
-    """Computes approximate IoU by converting bounding boxes to box masks."""
-    if gt_masks is None or not boxes:
-        return 0.0
-    T, H, W = gt_masks.shape
-    box_masks = np.zeros((T, H, W), dtype=bool)
-    for t in range(min(T, len(boxes))):
-        b = boxes[t]
-        if len(b) == 4 and b != [0, 0, 0, 0]:
-            x1, y1 = int(np.clip(b[0] * W, 0, W - 1)), int(np.clip(b[1] * H, 0, H - 1))
-            x2, y2 = int(np.clip(b[2] * W, x1 + 1, W)), int(np.clip(b[3] * H, y1 + 1, H))
-            box_masks[t, y1:y2, x1:x2] = True
-    return compute_mask_iou(box_masks, gt_masks)
-
-
 def extract_objects_from_cot(cot_text: str) -> Tuple[Optional[str], Optional[str]]:
     f_obj = None
     s_obj = None
@@ -118,34 +93,108 @@ def extract_objects_from_cot(cot_text: str) -> Tuple[Optional[str], Optional[str
     return f_obj, s_obj
 
 
-def build_expert_trajectory(expression: str, uid: str = "sample_0") -> List[Dict[str, Any]]:
-    """Generates 4 scripted expert turns with build_turn_prompt and formatted completion JSON."""
+def load_gt_mask_sequence(mask_paths: List[str]) -> np.ndarray:
+    """Load the ten ground-truth masks using the original dataset's mask layout."""
+    missing = [path for path in mask_paths if not os.path.isfile(path)]
+    if missing:
+        raise FileNotFoundError(f"Ground-truth mask file not found: {missing[0]}")
+    masks = [np.asarray(Image.open(path).convert("L")) > 0 for path in mask_paths]
+    return np.stack(masks, axis=0)
+
+
+def select_candidate_by_mask_iou(
+    candidates: List[Dict[str, Any]],
+    gt_masks: np.ndarray,
+    tool_client: Any,
+    uid: str,
+) -> Tuple[Optional[int], Dict[int, Dict[str, Any]]]:
+    """Run SAM2 for each candidate and select only by the training GT mask IoU."""
+    results = {}
+    for candidate in candidates:
+        candidate_id = int(candidate["cand_id"])
+        boxes = candidate.get("boxes")
+        if not boxes:
+            raise ValueError(f"Candidate {candidate_id} has no boxes for SAM2.")
+        masks, logits = tool_client.sam2_segment(uid, boxes)
+        mask_array = np.asarray(masks, dtype=np.uint8)
+        results[candidate_id] = {
+            "masks": mask_array,
+            "logits": np.asarray(logits, dtype=np.float32),
+            "iou": compute_mask_iou(mask_array, gt_masks),
+            "mean_mask_area": float((mask_array > 0).mean()),
+        }
+    if not results:
+        return None, results
+    best_candidate = max(results, key=lambda candidate_id: results[candidate_id]["iou"])
+    return best_candidate, results
+
+
+def build_expert_trajectory(
+    expression: str,
+    uid: str = "sample_0",
+    mock: bool = False,
+) -> List[Dict[str, Any]]:
+    """Generate an explicitly mock-only scripted trajectory from mock tool results."""
+    if not mock:
+        raise ValueError("build_expert_trajectory is available only in --mock mode.")
+
     history = []
     turns = []
+    mock_server = MockToolServer()
+    mock_client = ToolClient(use_mock_fallback=True, use_cache=False)
+    kg_result = mock_server.kg_retrieve(uid, expression)
+    inspection = mock_client.inspect_frames(uid, 0, 9)
+    candidates = mock_server.referdino_ground(uid, expression)
+    if not candidates:
+        raise RuntimeError(f"Mock ReferDINO returned no candidates for '{uid}'.")
+    candidate = candidates[0]
+    masks, logits = mock_server.sam2_segment(uid, candidate["boxes"])
+    masks_array = np.asarray(masks, dtype=np.uint8)
+    mask_area = float((masks_array > 0).mean())
+
     steps = [
         {
             "thought": f"Query the multimodal knowledge graph to gather relational and acoustic context for '{expression}'.",
             "action": "retrieve_evidence",
             "args": {"query": expression},
-            "obs_data": {"facts": [f"Visual entity '{expression}' localized in video frames", "Acoustic event active across sequence"]}
+            "obs_data": kg_result,
+            "tool_result": kg_result,
+        },
+        {
+            "thought": "Inspect the full clip for observed audio activity and visible proposals.",
+            "action": "inspect_frames",
+            "args": {"start": 0, "end": 9},
+            "obs_data": inspection,
+            "tool_result": inspection,
         },
         {
             "thought": f"Ground candidate object tubelets matching '{expression}' using ReferDINO.",
             "action": "call_referdino",
             "args": {"text": expression},
-            "obs_data": {"candidates": [{"cand_id": 0, "side": "center", "score": 0.88, "mean_area": 0.14}]}
+            "obs_data": {"candidates": candidates},
+            "tool_result": {"candidates": candidates},
         },
         {
-            "thought": "Refine grounded candidate 0 bounding boxes into pixel-accurate binary masks using SAM2.",
+            "thought": f"Refine candidate {candidate['cand_id']} bounding boxes into pixel-level masks using SAM2.",
             "action": "call_sam2",
-            "args": {"candidate_id": 0},
-            "obs_data": {"candidate_id": 0, "num_frames": 10, "mean_mask_area": 0.14}
+            "args": {"candidate_id": candidate["cand_id"]},
+            "obs_data": {
+                "candidate_id": candidate["cand_id"],
+                "num_frames": len(masks_array),
+                "mean_mask_area": mask_area,
+            },
+            "tool_result": {
+                "masks": masks,
+                "logits": logits,
+                "mean_mask_area": mask_area,
+            },
         },
         {
             "thought": "Candidate segmented accurately across all 10 video frames; terminate reasoning episode.",
             "action": "stop",
             "args": {},
-            "obs_data": {}
+            "obs_data": {},
+            "tool_result": {},
         }
     ]
     for step in steps:
@@ -167,7 +216,9 @@ def build_expert_trajectory(expression: str, uid: str = "sample_0") -> List[Dict
             "action": step["action"],
             "args": step["args"],
             "thought": step["thought"],
-            "observation": obs_text
+            "observation": obs_text,
+            "tool_result": step.get("tool_result", {}),
+            "mock": True,
         })
         history.append({
             "thought": step["thought"],
@@ -205,71 +256,63 @@ def main():
     print(f"  Target Output: {args.out_path} | Max Samples: {args.num_samples} | Mock: {args.mock}")
     print("=" * 65)
 
-    tool_client = get_tool_client(server_url=args.tool_server_url, use_mock_fallback=args.mock)
+    if args.mock:
+        sample_exprs = [
+            ("mock_video_person", "the person playing acoustic guitar on the left"),
+            ("mock_video_dog", "the barking dog running across the grass"),
+            ("mock_video_singer", "the woman singing into a microphone"),
+            ("mock_video_piano", "the piano played on the right"),
+            ("mock_video_violin", "the violin soloist performing in the orchestra"),
+        ]
+        with open(args.out_path, "w", encoding="utf-8") as out_f:
+            for idx in range(args.num_samples):
+                uid, expression = sample_exprs[idx % len(sample_exprs)]
+                uid = f"{uid}_{idx:03d}"
+                for turn in build_expert_trajectory(expression, uid=uid, mock=True):
+                    out_f.write(json.dumps(turn) + "\n")
+        print(f"[Cold-Start MOCK] Wrote {args.num_samples * 5} mock turns to {args.out_path}")
+        return 0
+
+    if not os.path.isfile(args.meta_csv_path):
+        raise FileNotFoundError(f"Training metadata CSV not found: {args.meta_csv_path}")
+    tool_client = get_tool_client(server_url=args.tool_server_url, use_mock_fallback=False)
 
     # 1. Load train samples
     samples = []
-    if args.mock or not os.path.exists(args.meta_csv_path):
-        print(f"[Notice] Generating synthetic train samples (mock={args.mock})...")
-        sample_exprs = [
-            ("vid_001_person_0", "the person playing acoustic guitar on the left", False),
-            ("vid_002_dog_1", "the barking dog running across the grass", False),
-            ("vid_003_singer_0", "the woman singing into a microphone", False),
-            ("null_vid_004_piano_0", "the piano played on the right", True),
-            ("vid_005_violin_0", "the violin soloist performing in the orchestra", False),
-        ]
-        for i in range(args.num_samples):
-            base_uid, expr, is_null = sample_exprs[i % len(sample_exprs)]
-            uid = f"{base_uid}_{i:03d}"
+    cot_data = {}
+    if os.path.exists(args.cot_anno_path):
+        with open(args.cot_anno_path, "r", encoding="utf-8") as f:
+            cot_data = json.load(f)
+
+    with open(args.meta_csv_path, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(samples) >= args.num_samples:
+                break
+            if len(row) < 5 or row[2] != "train":
+                continue
+            vid, uid, split, fid, exp = row[:5]
+            uid_parts = uid.rsplit("_", 2)
+            is_null = len(uid_parts) >= 2 and uid_parts[-2].lower() == "null"
+            clean_vid = uid.rsplit("_", 2)[0]
+            f_obj, s_obj = extract_objects_from_cot(
+                cot_data.get(uid, {}).get("output", "")
+            )
             samples.append({
                 "uid": uid,
-                "vid": uid.rsplit("_", 2)[0],
-                "expr": expr,
+                "vid": clean_vid,
+                "fid": fid,
+                "expr": exp,
                 "is_null": is_null,
-                "f_object": expr.split()[1] if len(expr.split()) > 1 else "object",
-                "s_object": None,
-                "video_path": os.path.join(args.media_dir, uid.rsplit("_", 2)[0], "frames"),
-                "audio_path": os.path.join(args.media_dir, uid.rsplit("_", 2)[0], "audio.wav"),
-                "gt_masks": None,
+                "f_object": f_obj,
+                "s_object": s_obj,
+                "video_path": os.path.join(args.media_dir, clean_vid, "frames"),
+                "audio_path": os.path.join(args.media_dir, clean_vid, "audio.wav"),
+                "mask_paths": [
+                    os.path.join(args.gt_mask_dir, vid, f"fid_{fid}", f"0000{i}.png")
+                    for i in range(10)
+                ],
             })
-    else:
-        # Real metadata CSV reading
-        cot_data = {}
-        if os.path.exists(args.cot_anno_path):
-            with open(args.cot_anno_path, "r", encoding="utf-8") as f:
-                cot_data = json.load(f)
-
-        with open(args.meta_csv_path, "r", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if len(samples) >= args.num_samples:
-                    break
-                if len(row) < 5:
-                    continue
-                vid, uid, split, fid, exp = row[:5]
-                if split != "train":
-                    continue
-
-                is_null = uid.startswith("null_")
-                clean_vid = uid.rsplit("_", 2)[0]
-
-                cot_output = cot_data.get(uid, {}).get("output", "")
-                f_obj, s_obj = extract_objects_from_cot(cot_output)
-
-                v_path = os.path.join(args.media_dir, clean_vid, "frames")
-                a_path = os.path.join(args.media_dir, clean_vid, "audio.wav")
-
-                samples.append({
-                    "uid": uid,
-                    "vid": clean_vid,
-                    "expr": exp,
-                    "is_null": is_null,
-                    "f_object": f_obj,
-                    "s_object": s_obj,
-                    "video_path": v_path,
-                    "audio_path": a_path,
-                    "gt_masks": None,
-                })
 
     print(f"[Cold-Start] Processing {len(samples)} samples with real tool rollouts...")
 
@@ -286,6 +329,7 @@ def main():
 
             history = []
             sample_turns = []
+            training_supervision = None
 
             # Step 1: retrieve_evidence
             t_idx = idx % len(THOUGHT_TEMPLATES["retrieve_evidence"])
@@ -298,6 +342,7 @@ def main():
                 "action": "retrieve_evidence",
                 "args": {"query": expr},
                 "observation": obs_kg,
+                "tool_result": kg_res,
             })
             history.append({
                 "thought": thought_kg,
@@ -310,16 +355,19 @@ def main():
             if any(cue in expr.lower() for cue in ["while", "when", "during", "sound", "loud", "play"]):
                 t_insp = idx % len(THOUGHT_TEMPLATES["inspect_frames"])
                 thought_insp = THOUGHT_TEMPLATES["inspect_frames"][t_insp]
-                res_insp = {
-                    "start": 0, "end": 9, "num_frames": 10,
-                    "avg_audio_loudness": 0.45, "visible_candidate_ids": [0, 1]
-                }
+                res_insp = tool_client.inspect_frames(
+                    uid,
+                    0,
+                    9,
+                    visible_candidate_ids=[],
+                )
                 obs_insp = format_observation("inspect_frames", res_insp)
                 sample_turns.append({
                     "thought": thought_insp,
                     "action": "inspect_frames",
                     "args": {"start": 0, "end": 9},
                     "observation": obs_insp,
+                    "tool_result": res_insp,
                 })
                 history.append({
                     "thought": thought_insp,
@@ -338,19 +386,25 @@ def main():
                     "action": "stop",
                     "args": {},
                     "observation": obs_stop,
+                    "tool_result": {},
                 })
             else:
+                gt_masks = load_gt_mask_sequence(s["mask_paths"])
                 # Step 2: call_referdino
                 t_ref = idx % len(THOUGHT_TEMPLATES["call_referdino"])
                 thought_ref = THOUGHT_TEMPLATES["call_referdino"][t_ref].format(target=grounding_target)
                 cands = tool_client.referdino_ground(uid, grounding_target)
                 obs_ref = format_observation("call_referdino", {"candidates": cands})
+                if not cands:
+                    skipped_low_iou += 1
+                    continue
 
                 sample_turns.append({
                     "thought": thought_ref,
                     "action": "call_referdino",
                     "args": {"text": grounding_target},
                     "observation": obs_ref,
+                    "tool_result": {"candidates": cands},
                 })
                 history.append({
                     "thought": thought_ref,
@@ -359,47 +413,49 @@ def main():
                     "observation": obs_ref,
                 })
 
-                # Choose best candidate via GT IoU guidance (training only)
-                best_cand_id = 0
-                best_iou = 0.85
-                best_side = "center"
-                best_score = 0.85
-
-                if cands:
-                    best_cand_id = cands[0].get("cand_id", 0)
-                    best_side = cands[0].get("side", "center")
-                    best_score = cands[0].get("score", 0.85)
-
-                    if s["gt_masks"] is not None:
-                        best_cand_id = 0
-                        best_iou = -1.0
-                        for c in cands:
-                            boxes = c.get("boxes", [])
-                            iou = compute_box_mask_iou(boxes, s["gt_masks"])
-                            if iou > best_iou:
-                                best_iou = iou
-                                best_cand_id = c.get("cand_id", 0)
-                                best_side = c.get("side", "center")
-                                best_score = c.get("score", 0.85)
-
-                        if best_iou < args.iou_threshold:
-                            skipped_low_iou += 1
-                            continue
+                best_cand_id, sam2_results = select_candidate_by_mask_iou(
+                    cands,
+                    gt_masks,
+                    tool_client,
+                    uid,
+                )
+                if best_cand_id is None:
+                    skipped_low_iou += 1
+                    continue
+                best_iou = sam2_results[best_cand_id]["iou"]
+                if best_iou < args.iou_threshold:
+                    skipped_low_iou += 1
+                    continue
+                selected_cand = next(
+                    candidate for candidate in cands
+                    if int(candidate["cand_id"]) == best_cand_id
+                )
+                best_side = selected_cand.get("side", "center")
+                best_score = selected_cand.get("score", 0.0)
 
                 # Step 3: call_sam2
                 t_sam = idx % len(THOUGHT_TEMPLATES["call_sam2"])
                 thought_sam = THOUGHT_TEMPLATES["call_sam2"][t_sam].format(
                     cid=best_cand_id, side=best_side, score=best_score
                 )
-                chosen_boxes = cands[best_cand_id].get("boxes", [[0, 0, 1, 1]] * 10) if (cands and best_cand_id < len(cands)) else [[0, 0, 1, 1]] * 10
-                sam_res = tool_client.sam2_segment(uid, chosen_boxes)
-                obs_sam = format_observation("call_sam2", {"candidate_id": best_cand_id, "num_frames": 10, "mean_mask_area": 0.15})
+                selected_masks = sam2_results[best_cand_id]["masks"]
+                sam_summary = {
+                    "candidate_id": best_cand_id,
+                    "num_frames": int(selected_masks.shape[0]),
+                    "mean_mask_area": sam2_results[best_cand_id]["mean_mask_area"],
+                }
+                obs_sam = format_observation("call_sam2", sam_summary)
 
                 sample_turns.append({
                     "thought": thought_sam,
                     "action": "call_sam2",
                     "args": {"candidate_id": best_cand_id},
                     "observation": obs_sam,
+                    "tool_result": {
+                        "masks": selected_masks.tolist(),
+                        "logits": sam2_results[best_cand_id]["logits"].tolist(),
+                        **sam_summary,
+                    },
                 })
                 history.append({
                     "thought": thought_sam,
@@ -417,7 +473,12 @@ def main():
                     "action": "stop",
                     "args": {},
                     "observation": obs_stop,
+                    "tool_result": {},
                 })
+                training_supervision = {
+                    "candidate_id": best_cand_id,
+                    "mask_iou": best_iou,
+                }
 
             # Format turns for LoRA SFT: prompt_text, completion_text, media paths
             rolling_history = []
@@ -444,7 +505,10 @@ def main():
                     "observation": turn["observation"],
                     "video_path": s["video_path"],
                     "audio_path": s["audio_path"],
+                    "tool_result": turn.get("tool_result", {}),
                 }
+                if training_supervision is not None:
+                    out_record["training_supervision"] = training_supervision
                 out_f.write(json.dumps(out_record) + "\n")
                 written_turns += 1
 

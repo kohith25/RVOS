@@ -95,6 +95,13 @@ class ToolClient:
             result = {"masks": masks, "logits": logits}
         elif endpoint == "kg":
             result = mock.kg_retrieve(payload.get("video_id"), payload.get("query"), payload.get("k_hops", 1))
+        elif endpoint == "inspect_frames":
+            result = mock.inspect_frames(
+                payload.get("video_id"),
+                payload.get("start", 0),
+                payload.get("end", 9),
+                payload.get("visible_candidate_ids", []),
+            )
         else:
             raise ValueError(f"Unknown endpoint {endpoint}")
 
@@ -154,6 +161,28 @@ class ToolClient:
 
     def retrieve_evidence(self, video_id: str, query: str, k_hops: int = 1) -> Dict[str, Any]:
         return self.kg_retrieve(video_id, query, k_hops=k_hops)
+
+    def inspect_frames(
+        self,
+        video_id: str,
+        start: int,
+        end: int,
+        visible_candidate_ids: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "video_id": video_id,
+            "start": start,
+            "end": end,
+            "visible_candidate_ids": visible_candidate_ids or [],
+        }
+        if self.use_mock_fallback:
+            return self._get_mock_server().inspect_frames(
+                payload["video_id"],
+                payload["start"],
+                payload["end"],
+                payload["visible_candidate_ids"],
+            )
+        return self._post("inspect_frames", payload)
 
 
 _default_tool_client = None

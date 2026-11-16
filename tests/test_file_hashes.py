@@ -28,7 +28,7 @@ NORMALIZED_MANIFEST = {
     "ground_segment_scripts/ground_segment_with_direct_reference_of_RefAVSBench.py": "bd6dfa8f1dee1e68c518b014238d1582f194adb341a669b96482b1d27e146f24",
     "ground_segment_scripts/ground_segment_with_direct_reference_of_R2AVSBench.py": "05d47f66b33cad469357ca1ba70e179415b54ae54a7289135153ec6e677ed70d",
     "peft_hyper/peft_model.py": "b814d1e346735660da20ff39c1e6437858203e0837795672f1fc5aa3a6ea360f",
-    "README.md": "b684850658dedcd99b944f6fea9421c9e45bbfc2f57c745a4f96ab73c8517a7b",
+    "README.md": "44ba150ae8d31a6479835ea7e28ef503daa5f74e5a87b64e746a2f1e9cc5ba9c",
     "think_environment.yml": "9fb02c81feb8cc2e1760eb6c26367c9176228f257dfcbc0bff1975641a1d1897",
     "dinosam2_environment.yml": "7e1abd09dae7de64937c015722bf12f6c03ff72289b30d7078ed9f0ba8b1ccd7",
 }

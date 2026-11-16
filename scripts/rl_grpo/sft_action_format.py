@@ -18,7 +18,8 @@ import sys
 import json
 import random
 import argparse
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
+import numpy as np
 from PIL import Image
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -78,7 +79,7 @@ def load_real_media_tensors(video_path: str, audio_path: str) -> Tuple[Optional[
     try:
         from dataset.audio_processor import preprocess
         audio_tensor = preprocess(audio_path)
-    except Exception:
+    except ImportError:
         import wave
         with wave.open(audio_path, "rb") as wf:
             n_frames = wf.getnframes()
@@ -114,6 +115,14 @@ def get_parser():
 
 def parse_args(args=None):
     return get_parser().parse_args(args)
+
+
+def reject_mock_rows(turns: List[Dict[str, Any]], use_mock: bool) -> None:
+    if not use_mock and any(turn.get("mock") is True for turn in turns):
+        raise ValueError(
+            "Cold-start data contains mock rows. Rebuild it with real media or pass --mock "
+            "for a CPU-only mock run; mock data must not train a real checkpoint."
+        )
 
 
 def save_sft_checkpoint(model: Any, output_dir: str):
@@ -171,6 +180,7 @@ def main():
                 turns.append(json.loads(line))
 
     print(f"[SFT] Loaded {len(turns)} training turns.")
+    reject_mock_rows(turns, use_mock=args.mock)
 
     # 2. Build model
     if args.mock:

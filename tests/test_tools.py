@@ -15,6 +15,7 @@ Verifies:
 import os
 import sys
 import json
+import ast
 import tempfile
 import inspect
 import pytest
@@ -29,7 +30,7 @@ from tools.sam2_tool import SAM2Tool
 from tools.mock_server import MockToolServer
 from tools.client import ToolClient
 from kg.build_kg import build_graph
-from kg.retriever import retrieve
+from kg.retriever import KGRetriever
 from rl_grpo.constants import (
     ALLOWED_ACTIONS,
     parse_and_validate_action,
@@ -116,7 +117,20 @@ def test_sam2_tool():
 
 def test_kg_retriever():
     """Verify Multimodal Knowledge Graph construction and retrieval."""
-    res = retrieve("test_vid_kg_01", "the guitar playing on the left", k_hops=1)
+    fixtures_dir = os.path.join(REPO_ROOT, "tests", "fixtures")
+    from tests.test_kg import StubDetector, StubTagger
+    with tempfile.TemporaryDirectory() as kg_dir:
+        build_graph(
+            "moving_rect",
+            media_dir=fixtures_dir,
+            kg_dir=kg_dir,
+            reference_expression="the guitar playing on the left",
+            detector=StubDetector(label="guitar"),
+            audio_tagger=StubTagger(primary_label="Acoustic_guitar"),
+        )
+        res = KGRetriever(kg_dir=kg_dir, media_dir=fixtures_dir).retrieve(
+            "moving_rect", "the guitar playing on the left", k_hops=1
+        )
     assert "facts" in res
     assert "node_ids" in res
     assert len(res["facts"]) > 0
@@ -304,13 +318,21 @@ def test_referdino_tool_no_groundingdino_import():
     """Verify that ReferDINOTool does NOT import grounding_dino or groundingdino."""
     referdino_file = os.path.join(REPO_ROOT, "tools", "referdino_tool.py")
     with open(referdino_file, "r", encoding="utf-8") as f:
-        content = f.read()
+        tree = ast.parse(f.read())
 
-    # Split into ReferDINOTool class definition vs the rest
-    assert "class ReferDINOTool:" in content
-    cls_code = content.split("class ReferDINOTool:")[1].split("class GroundingDINOTool:")[0]
-    assert "groundingdino" not in cls_code.lower()
-    assert "grounding_dino" not in cls_code.lower()
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ReferDINOTool")
+    imports = [
+        alias.name.lower()
+        for node in ast.walk(cls)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    ]
+    imports.extend(
+        node.module.lower()
+        for node in ast.walk(cls)
+        if isinstance(node, ast.ImportFrom) and node.module
+    )
+    assert not any("groundingdino" in name or "grounding_dino" in name for name in imports)
 
 
 def test_server_info_endpoint():

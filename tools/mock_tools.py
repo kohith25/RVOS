@@ -190,3 +190,27 @@ class MockToolServer:
                 ],
                 "node_ids": [f"{video_id}_vis_0", f"{video_id}_aud_sec0"],
             }
+
+    def inspect_frames(
+        self,
+        video_id: str,
+        start: int,
+        end: int,
+        visible_candidate_ids: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        """Return deterministic mock observations keyed by video and frame range."""
+        digest = hashlib.sha256(f"{video_id}:{start}:{end}".encode("utf-8")).digest()
+        loudness = int.from_bytes(digest[:2], "big") / 65535.0
+        active_audio_secs = [
+            second for second in range(start, end + 1)
+            if digest[second % len(digest)] > 127
+        ]
+        return {
+            "start": start,
+            "end": end,
+            "num_frames": end - start + 1,
+            "avg_audio_loudness": round(loudness, 3),
+            "active_audio_secs": active_audio_secs,
+            "visible_candidate_ids": list(visible_candidate_ids or []),
+            "resolution": [224, 224],
+        }
